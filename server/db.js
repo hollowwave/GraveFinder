@@ -9,7 +9,8 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS cemeteries (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
-  description TEXT
+  description TEXT,
+  bounds TEXT
 );
 CREATE TABLE IF NOT EXISTS graves (
   id INTEGER PRIMARY KEY,
@@ -38,5 +39,8 @@ CREATE TABLE IF NOT EXISTS admin_users (
 );
 CREATE INDEX IF NOT EXISTS idx_records_name ON burial_records(full_name COLLATE NOCASE);
 `);
+
+const cemeteryCols = db.prepare('PRAGMA table_info(cemeteries)').all().map((c) => c.name);
+if (!cemeteryCols.includes('bounds')) db.exec('ALTER TABLE cemeteries ADD COLUMN bounds TEXT');
 
 module.exports = db;

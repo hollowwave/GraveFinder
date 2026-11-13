@@ -66,8 +66,23 @@ app.post('/api/login', (req, res) => {
   res.json({ token, username: user.username });
 });
 
+const getBounds = () => {
+  const stored = db.prepare('SELECT bounds FROM cemeteries LIMIT 1').get();
+  if (stored && stored.bounds) return JSON.parse(stored.bounds);
+  const a = db.prepare('SELECT MIN(latitude) minLat, MAX(latitude) maxLat, MIN(longitude) minLng, MAX(longitude) maxLng FROM graves').get();
+  const pad = 0.00006;
+  return { minLat: a.minLat - pad, maxLat: a.maxLat + pad, minLng: a.minLng - pad, maxLng: a.maxLng + pad };
+};
+
+const checkLocation = (lat, lng) => {
+  const b = getBounds();
+  if (lat < b.minLat || lat > b.maxLat || lng < b.minLng || lng > b.maxLng)
+    return 'That location is outside the cemetery boundary';
+  return null;
+};
+
 app.get('/api/cemetery', (req, res) => {
-  const cemetery = db.prepare('SELECT * FROM cemeteries LIMIT 1').get();
+  const cemetery = db.prepare('SELECT id, name, description FROM cemeteries LIMIT 1').get();
   const rows = db.prepare(`
     SELECT section, MIN(latitude) minLat, MAX(latitude) maxLat, MIN(longitude) minLng, MAX(longitude) maxLng
     FROM graves GROUP BY section ORDER BY section`).all();
@@ -76,22 +91,18 @@ app.get('/api/cemetery', (req, res) => {
   const sections = rows.map((s) => ({
     type: 'Feature',
     properties: { kind: 'section', section: s.section },
-    geometry: { type: 'Polygon', coordinates: ring(s.minLng - pad, s.minLat - pad, s.maxLng + pad, s.maxLat + pad).map((r) => r.map(([x, y]) => [x, y])) },
+    geometry: { type: 'Polygon', coordinates: ring(s.minLng - pad, s.minLat - pad, s.maxLng + pad, s.maxLat + pad) },
   }));
-  const all = rows.reduce((a, s) => ({
-    minLat: Math.min(a.minLat, s.minLat), maxLat: Math.max(a.maxLat, s.maxLat),
-    minLng: Math.min(a.minLng, s.minLng), maxLng: Math.max(a.maxLng, s.maxLng),
-  }), { minLat: 90, maxLat: -90, minLng: 180, maxLng: -180 });
-  const bp = 0.00006;
+  const bounds = getBounds();
   const boundary = {
     type: 'Feature',
     properties: { kind: 'boundary', name: cemetery.name },
-    geometry: { type: 'Polygon', coordinates: ring(all.minLng - bp, all.minLat - bp, all.maxLng + bp, all.maxLat + bp) },
+    geometry: { type: 'Polygon', coordinates: ring(bounds.minLng, bounds.minLat, bounds.maxLng, bounds.maxLat) },
   };
   res.json({
     ...cemetery,
-    center: { latitude: (all.minLat + all.maxLat) / 2, longitude: (all.minLng + all.maxLng) / 2 },
-    bounds: { minLat: all.minLat - bp, maxLat: all.maxLat + bp, minLng: all.minLng - bp, maxLng: all.maxLng + bp },
+    center: { latitude: (bounds.minLat + bounds.maxLat) / 2, longitude: (bounds.minLng + bounds.maxLng) / 2 },
+    bounds,
     geojson: { type: 'FeatureCollection', features: [boundary, ...sections] },
   });
 });
@@ -125,6 +136,8 @@ app.post('/api/graves', requireAdmin, (req, res) => {
   const { section, block, row, grave_number, latitude, longitude } = req.body || {};
   if (!section || !block || !row || !grave_number || isNaN(latitude) || isNaN(longitude) || latitude === '' || longitude === '')
     return res.status(400).json({ error: 'section, block, row, grave_number, latitude and longitude are required' });
+  const outside = checkLocation(Number(latitude), Number(longitude));
+  if (outside) return res.status(400).json({ error: outside });
   try {
     const info = db.prepare(
       "INSERT INTO graves (cemetery_id, section, block, row, grave_number, latitude, longitude, status) VALUES (1,?,?,?,?,?,?, 'available')"
@@ -142,6 +155,8 @@ app.put('/api/graves/:id', requireAdmin, (req, res) => {
   const { latitude, longitude } = req.body || {};
   if (isNaN(latitude) || isNaN(longitude) || latitude === '' || longitude === '' || latitude == null || longitude == null)
     return res.status(400).json({ error: 'latitude and longitude are required' });
+  const outside = checkLocation(Number(latitude), Number(longitude));
+  if (outside) return res.status(400).json({ error: outside });
   db.prepare('UPDATE graves SET latitude=?, longitude=? WHERE id=?').run(Number(latitude), Number(longitude), grave.id);
   res.json(db.prepare('SELECT * FROM graves WHERE id=?').get(grave.id));
 });
