@@ -54,7 +54,24 @@ export default function CemeteryMap({ route }) {
   if (!cemetery) return <ActivityIndicator style={{ marginTop: 40 }} color={colors.moss} />;
 
   const b = cemetery.bounds;
-  const entrance = { latitude: b.minLat - 0.0002, longitude: cemetery.center.longitude };
+  const entrance = { latitude: b.minLat + 0.00003, longitude: cemetery.center.longitude };
+  const home = {
+    latitude: cemetery.center.latitude,
+    longitude: cemetery.center.longitude,
+    latitudeDelta: (b.maxLat - b.minLat) * 1.6,
+    longitudeDelta: (b.maxLng - b.minLng) * 1.6,
+  };
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const keepInside = (r) => {
+    const tooWide = r.latitudeDelta > home.latitudeDelta * 1.5;
+    const out = r.latitude < b.minLat || r.latitude > b.maxLat || r.longitude < b.minLng || r.longitude > b.maxLng;
+    if (tooWide) mapRef.current.animateToRegion(home, 300);
+    else if (out)
+      mapRef.current.animateToRegion(
+        { ...r, latitude: clamp(r.latitude, b.minLat, b.maxLat), longitude: clamp(r.longitude, b.minLng, b.maxLng) },
+        300
+      );
+  };
   const gpsInRange = gps && distance(gps, cemetery.center) < GPS_RANGE_METERS;
   const simulated = !(gpsInRange && useGps);
   const position = simulated ? entrance : gps;
@@ -85,12 +102,8 @@ export default function CemeteryMap({ route }) {
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         mapType={Platform.OS === 'android' ? 'none' : 'standard'}
-        initialRegion={{
-          latitude: cemetery.center.latitude,
-          longitude: cemetery.center.longitude,
-          latitudeDelta: (b.maxLat - b.minLat) * 1.6,
-          longitudeDelta: (b.maxLng - b.minLng) * 1.6,
-        }}
+        initialRegion={home}
+        onRegionChangeComplete={keepInside}
         maxZoomLevel={21}
         showsUserLocation={!simulated}
         onPress={onMapPress}
