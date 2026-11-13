@@ -1,4 +1,4 @@
-import json, sys, urllib.request, urllib.parse
+import json, sys, urllib.request, urllib.error, urllib.parse
 
 API = 'http://127.0.0.1:4000/api'
 ok_all = True
@@ -27,6 +27,7 @@ b = c['bounds']
 graves = get('/graves')
 inside = all(b['minLat'] <= g['latitude'] <= b['maxLat'] and b['minLng'] <= g['longitude'] <= b['maxLng'] for g in graves)
 check('all graves lie inside the cemetery boundary', inside)
+check('cemetery is Trece Martires Memorial Park', c['name'] == 'Trece Martires Memorial Park' and 14.2 < c['center']['latitude'] < 14.3 and 120.8 < c['center']['longitude'] < 120.9)
 check('every record has a grave with coordinates', all(r['grave_id'] and r['latitude'] for r in q('')))
 check('no two records share a grave', len({r['grave_id'] for r in q('')}) == len(q('')))
 
@@ -38,6 +39,17 @@ check('new record is found by the visitor search', len(found) == 1)
 detail = get('/records/%d' % found[0]['id'])
 check('record detail matches the assigned grave', detail['grave_id'] == free['id'] and detail['latitude'] == free['latitude'])
 check('map data shows that grave occupied by the person', [g for g in get('/graves') if g['id'] == free['id']][0]['occupant'] == 'Visitor Flow Person')
+def status(method, path, body, token):
+    r = urllib.request.Request(API + path, json.dumps(body).encode(), {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token}, method=method)
+    try:
+        return urllib.request.urlopen(r).status
+    except urllib.error.HTTPError as e:
+        return e.code
+inside = {'latitude': c['center']['latitude'], 'longitude': c['center']['longitude']}
+far = {'latitude': 14.52, 'longitude': 121.05}
+check('server rejects a new grave outside the boundary', status('POST', '/graves', {'section': 'Z', 'block': '1', 'row': '1', 'grave_number': 'OUT-1', **far}, tok) == 400)
+check('server rejects moving a grave outside the boundary', status('PUT', '/graves/%d' % free['id'], far, tok) == 400)
+check('server accepts a grave inside the boundary', status('PUT', '/graves/%d' % free['id'], {'latitude': free['latitude'], 'longitude': free['longitude']}, tok) == 200)
 req = urllib.request.Request(API + '/records/%d' % new['id'], method='DELETE', headers={'Authorization': 'Bearer ' + tok})
 urllib.request.urlopen(req)
 print('\nALL PASSED' if ok_all else '\nSOME FAILED')
