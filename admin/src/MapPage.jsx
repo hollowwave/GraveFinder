@@ -12,8 +12,6 @@ export default function MapPage({ cemetery }) {
   const [coords, setCoords] = useState({ latitude: '', longitude: '' });
   const [nf, setNf] = useState({ section: 'A', block: '1', row: '1', grave_number: '' });
   const [recordId, setRecordId] = useState('');
-  const [focus, setFocus] = useState(null);
-  const [place, setPlace] = useState('');
   const [msg, setMsg] = useState('');
 
   const load = useCallback(() => {
@@ -32,20 +30,32 @@ export default function MapPage({ cemetery }) {
     setMsg('');
   }, []);
 
+  const placeAt = useCallback(
+    (ll) => {
+      const b = cemetery.bounds;
+      if (ll.lat < b.minLat || ll.lat > b.maxLat || ll.lng < b.minLng || ll.lng > b.maxLng) {
+        setMsg('That spot is outside the cemetery boundary. Click inside the dashed line.');
+        return;
+      }
+      setMsg('');
+      setCoords({ latitude: round(ll.lat), longitude: round(ll.lng) });
+    },
+    [cemetery]
+  );
+
   const onGraveClick = useCallback(
     (g, ll) => {
       if (mode === 'select') pick(g);
-      else setCoords({ latitude: round(ll.lat), longitude: round(ll.lng) });
+      else placeAt(ll);
     },
-    [mode, pick]
+    [mode, pick, placeAt]
   );
 
   const onMapClick = useCallback(
     (ll) => {
-      if (mode === 'select') return;
-      setCoords({ latitude: round(ll.lat), longitude: round(ll.lng) });
+      if (mode !== 'select') placeAt(ll);
     },
-    [mode]
+    [mode, placeAt]
   );
 
   const guard = async (fn, ok) => {
@@ -73,20 +83,6 @@ export default function MapPage({ cemetery }) {
 
   const unassign = () => guard(() => api(`/records/${grave.record_id}/grave`, { method: 'PUT', body: { grave_id: null } }), 'Grave is now available');
 
-  const search = async (e) => {
-    e.preventDefault();
-    if (!place.trim()) return;
-    try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(place));
-      const [hit] = await r.json();
-      if (!hit) return flash('No place found for that search');
-      setFocus({ latitude: +hit.lat, longitude: +hit.lon, zoom: 17 });
-      flash(hit.display_name);
-    } catch {
-      flash('Place search is unavailable right now');
-    }
-  };
-
   const pin = mode !== 'select' && coords.latitude !== '' ? { latitude: +coords.latitude, longitude: +coords.longitude } : null;
   const occupied = graves.filter((g) => g.status === 'occupied').length;
 
@@ -94,21 +90,10 @@ export default function MapPage({ cemetery }) {
     <>
       <header className="pagehead">
         <h1>Cemetery map</h1>
-        <form className="inline" onSubmit={search}>
-          <input placeholder="Search a place or address" value={place} onChange={(e) => setPlace(e.target.value)} />
-          <button className="secondary">Find place</button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => setFocus({ latitude: cemetery.center.latitude, longitude: cemetery.center.longitude, zoom: 19 })}
-          >
-            Back to cemetery
-          </button>
-        </form>
       </header>
       <div className="mapgrid">
         <div>
-          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} focus={focus} />
+          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} />
           <p className="legend muted">
             <span className="dot occ" /> Occupied ({occupied})
             <span className="dot avail" /> Available ({graves.length - occupied})
@@ -188,3 +173,4 @@ export default function MapPage({ cemetery }) {
     </>
   );
 }
+

@@ -98,3 +98,5 @@ td.empty { text-align: center; color: var(--muted); padding: 1.6rem; }
   .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
   .mapgrid { grid-template-columns: 1fr; }
 }
+.panel section > button { margin: .35rem .5rem .35rem 0; }
+

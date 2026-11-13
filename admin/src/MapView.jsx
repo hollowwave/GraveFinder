@@ -4,7 +4,7 @@ import 'leaflet/dist/leaflet.css';
 
 const COLORS = { occupied: '#8c3b34', available: '#ffffff', selected: '#e0a100' };
 
-export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, focus }) {
+export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin }) {
   const el = useRef();
   const map = useRef();
   const layer = useRef();
@@ -19,7 +19,11 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
       attribution: '© OpenStreetMap contributors',
     }).addTo(m);
     const b = cemetery.bounds;
-    m.fitBounds([[b.minLat, b.minLng], [b.maxLat, b.maxLng]]);
+    const area = L.latLngBounds([b.minLat, b.minLng], [b.maxLat, b.maxLng]);
+    m.fitBounds(area);
+    m.setMinZoom(m.getZoom());
+    m.setMaxBounds(area.pad(0.25));
+    m.options.maxBoundsViscosity = 1;
     L.geoJSON(cemetery.geojson, {
       style: (f) =>
         f.properties.kind === 'boundary'
@@ -62,9 +66,6 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
     }
   }, [graves, selectedId, pin, onSelect]);
 
-  useEffect(() => {
-    if (focus && map.current) map.current.setView([focus.latitude, focus.longitude], focus.zoom || 20);
-  }, [focus]);
-
   return <div ref={el} className="map" />;
 }
+
