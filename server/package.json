@@ -1,0 +1,19 @@
+{
+  "name": "gravefinder-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "seed": "node seed.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "cors": "^2.8.6",
+    "express": "^4.22.3"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "file:C:\\Users\\ianca\\Downloads\\gravefinder (2)\\gravefinder-app\\server\\better-sqlite3.tgz": true
+  }
+}
