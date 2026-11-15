@@ -54,7 +54,8 @@ export default function CemeteryMap({ route }) {
   if (!cemetery) return <ActivityIndicator style={{ marginTop: 40 }} color={colors.moss} />;
 
   const b = cemetery.bounds;
-  const entrance = { latitude: b.minLat + 0.00003, longitude: cemetery.center.longitude };
+  const south = boundary.geometry.coordinates[0].reduce((a, c) => (c[1] < a[1] ? c : a));
+  const entrance = { latitude: south[1], longitude: south[0] };
   const home = {
     latitude: cemetery.center.latitude,
     longitude: cemetery.center.longitude,

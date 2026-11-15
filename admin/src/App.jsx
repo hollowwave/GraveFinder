@@ -113,7 +113,7 @@ export default function App() {
           <>
             {page === 'overview' && <Overview go={setPage} />}
             {page === 'records' && <Records cemetery={cemetery} />}
-            {page === 'map' && <MapPage cemetery={cemetery} />}
+            {page === 'map' && <MapPage cemetery={cemetery} onCemeteryChange={setCemetery} />}
           </>
         )}
       </main>

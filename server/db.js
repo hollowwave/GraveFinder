@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS cemeteries (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
-  bounds TEXT
+  bounds TEXT,
+  boundary TEXT
 );
 CREATE TABLE IF NOT EXISTS graves (
   id INTEGER PRIMARY KEY,
@@ -42,5 +43,6 @@ CREATE INDEX IF NOT EXISTS idx_records_name ON burial_records(full_name COLLATE 
 
 const cemeteryCols = db.prepare('PRAGMA table_info(cemeteries)').all().map((c) => c.name);
 if (!cemeteryCols.includes('bounds')) db.exec('ALTER TABLE cemeteries ADD COLUMN bounds TEXT');
+if (!cemeteryCols.includes('boundary')) db.exec('ALTER TABLE cemeteries ADD COLUMN boundary TEXT');
 
 module.exports = db;

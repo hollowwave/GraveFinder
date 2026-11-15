@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from './api';
 import MapView from './MapView';
+import { pointInRing } from './geo';
 
 const round = (n) => Math.round(n * 1e7) / 1e7;
 
-export default function MapPage({ cemetery }) {
+export default function MapPage({ cemetery, onCemeteryChange }) {
   const [graves, setGraves] = useState([]);
   const [unassigned, setUnassigned] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -13,6 +14,9 @@ export default function MapPage({ cemetery }) {
   const [nf, setNf] = useState({ section: 'A', block: '1', row: '1', grave_number: '' });
   const [recordId, setRecordId] = useState('');
   const [msg, setMsg] = useState('');
+  const [draft, setDraft] = useState(null);
+  const [relayout, setRelayout] = useState(false);
+  const ring = cemetery.geojson.features.find((f) => f.properties.kind === 'boundary').geometry.coordinates[0];
 
   const load = useCallback(() => {
     api('/graves').then(setGraves);
@@ -32,31 +36,66 @@ export default function MapPage({ cemetery }) {
 
   const placeAt = useCallback(
     (ll) => {
-      const b = cemetery.bounds;
-      if (ll.lat < b.minLat || ll.lat > b.maxLat || ll.lng < b.minLng || ll.lng > b.maxLng) {
+      if (!pointInRing(ll.lat, ll.lng, ring)) {
         setMsg('That spot is outside the cemetery boundary. Click inside the dashed line.');
         return;
       }
       setMsg('');
       setCoords({ latitude: round(ll.lat), longitude: round(ll.lng) });
     },
-    [cemetery]
+    [ring]
   );
+
+  const addPoint = useCallback((ll) => setDraft((d) => [...d, { latitude: round(ll.lat), longitude: round(ll.lng) }]), []);
+  const movePoint = useCallback((i, ll) => setDraft((d) => d.map((p, k) => (k === i ? { latitude: round(ll.lat), longitude: round(ll.lng) } : p))), []);
+  const removePoint = useCallback((i) => setDraft((d) => d.filter((_, k) => k !== i)), []);
 
   const onGraveClick = useCallback(
     (g, ll) => {
       if (mode === 'select') pick(g);
+      else if (mode === 'boundary') addPoint(ll);
       else placeAt(ll);
     },
-    [mode, pick, placeAt]
+    [mode, pick, placeAt, addPoint]
   );
 
   const onMapClick = useCallback(
     (ll) => {
-      if (mode !== 'select') placeAt(ll);
+      if (mode === 'boundary') addPoint(ll);
+      else if (mode !== 'select') placeAt(ll);
     },
-    [mode, placeAt]
+    [mode, placeAt, addPoint]
   );
+
+  const startBoundary = () => {
+    setDraft(ring.slice(0, -1).map(([lng, lat]) => ({ latitude: lat, longitude: lng })));
+    setRelayout(false);
+    setSelId(null);
+    setMode('boundary');
+    setMsg('');
+  };
+
+  const cancelBoundary = () => {
+    setDraft(null);
+    setMode('select');
+    setMsg('');
+  };
+
+  const saveBoundary = async () => {
+    try {
+      const updated = await api('/cemetery/boundary', {
+        method: 'PUT',
+        body: { ring: draft.map((p) => [p.longitude, p.latitude]), relayout },
+      });
+      onCemeteryChange(updated);
+      setDraft(null);
+      setMode('select');
+      flash('Boundary saved');
+      load();
+    } catch (e) {
+      flash(e.message);
+    }
+  };
 
   const guard = async (fn, ok) => {
     try {
@@ -83,7 +122,7 @@ export default function MapPage({ cemetery }) {
 
   const unassign = () => guard(() => api(`/records/${grave.record_id}/grave`, { method: 'PUT', body: { grave_id: null } }), 'Grave is now available');
 
-  const pin = mode !== 'select' && coords.latitude !== '' ? { latitude: +coords.latitude, longitude: +coords.longitude } : null;
+  const pin = (mode === 'move' || mode === 'add') && coords.latitude !== '' ? { latitude: +coords.latitude, longitude: +coords.longitude } : null;
   const occupied = graves.filter((g) => g.status === 'occupied').length;
 
   return (
@@ -93,7 +132,8 @@ export default function MapPage({ cemetery }) {
       </header>
       <div className="mapgrid">
         <div>
-          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} />
+          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin}
+            locked={mode !== 'boundary'} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint} />
           <p className="legend muted">
             <span className="dot occ" /> Occupied ({occupied})
             <span className="dot avail" /> Available ({graves.length - occupied})
@@ -103,7 +143,7 @@ export default function MapPage({ cemetery }) {
         <aside className="panel">
           {msg && <p className="notice">{msg}</p>}
           {mode === 'select' && !grave && <p className="muted">Select a grave on the map to see who is buried there, move it, or assign a record.</p>}
-          {grave && (
+          {mode !== 'boundary' && grave && (
             <section>
               <h2>{grave.grave_number}</h2>
               <p className="muted">Section {grave.section}, block {grave.block}, row {grave.row}</p>
@@ -121,6 +161,7 @@ export default function MapPage({ cemetery }) {
               )}
             </section>
           )}
+          {mode !== 'boundary' && (
           <section>
             <h2>{mode === 'add' ? 'Add a grave' : 'Coordinates'}</h2>
             {mode === 'add' && (
@@ -168,9 +209,35 @@ export default function MapPage({ cemetery }) {
               </button>
             )}
           </section>
+          )}
+          {mode === 'select' && (
+            <section>
+              <h2>Cemetery boundary</h2>
+              <p className="muted">Redraw the outline when you have a more accurate map or plan.</p>
+              <button className="secondary" onClick={startBoundary}>Edit boundary</button>
+            </section>
+          )}
+          {mode === 'boundary' && (
+            <section>
+              <h2>Edit boundary</h2>
+              <p className="muted">Click the map to add corner points in order around the cemetery. Drag a point to move it. Right-click a point to delete it. You can zoom and pan freely while editing.</p>
+              <p>{draft.length} point{draft.length === 1 ? '' : 's'}</p>
+              <div className="inline">
+                <button className="secondary" disabled={!draft.length} onClick={() => setDraft((d) => d.slice(0, -1))}>Undo last point</button>
+                <button className="secondary" disabled={!draft.length} onClick={() => setDraft([])}>Start over</button>
+              </div>
+              <label className="check">
+                <input type="checkbox" checked={relayout} onChange={(e) => setRelayout(e.target.checked)} />
+                Move the sample graves inside the new boundary
+              </label>
+              <div className="actions">
+                <button className="secondary" onClick={cancelBoundary}>Cancel</button>
+                <button disabled={draft.length < 3} onClick={saveBoundary}>Save boundary</button>
+              </div>
+            </section>
+          )}
         </aside>
       </div>
     </>
   );
 }
-

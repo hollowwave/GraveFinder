@@ -1,16 +1,11 @@
 const crypto = require('crypto');
 const db = require('./db');
 const config = require('./cemetery.config.json');
+const { generateLayout } = require('./layout');
 
 const hash = (p) => crypto.createHash('sha256').update(p).digest('hex');
 
 const BOUNDARY_PAD = 0.00006;
-const D = 0.00003;
-const BLOCK_W = 4 * D + 0.00002;
-const SECTION_W = 2 * BLOCK_W + 0.00006;
-const SECTION_H = 3 * D + 0.00006;
-const SECTIONS = ['A', 'B', 'C', 'D'];
-
 const records = [
   ['Eleanor Mae Castillo', '1931-03-14', '2009-11-02', '2009-11-05', 'A', 1, 1, 1],
   ['Ramon Dela Cruz', '1928-07-22', '2004-01-19', '2004-01-22', 'A', 1, 1, 2],
@@ -43,49 +38,34 @@ const records = [
 const run = db.transaction(() => {
   db.exec('DELETE FROM burial_records; DELETE FROM graves; DELETE FROM cemeteries; DELETE FROM admin_users;');
 
-  const layout = [];
-  SECTIONS.forEach((section, i) => {
-    const sc = i % 2;
-    const sr = Math.floor(i / 2);
-    for (let b = 0; b < 2; b++) {
-      for (let r = 0; r < 3; r++) {
-        for (let g = 0; g < 4; g++) {
-          layout.push({
-            section,
-            block: String(b + 1),
-            row: String(r + 1),
-            number: `${section}${b + 1}-R${r + 1}-${String(g + 1).padStart(2, '0')}`,
-            lat: -(sr * SECTION_H + r * D),
-            lng: sc * SECTION_W + b * BLOCK_W + g * D,
-          });
-        }
-      }
-    }
-  });
-
-  const mid = (key) => (Math.min(...layout.map((g) => g[key])) + Math.max(...layout.map((g) => g[key]))) / 2;
-  const shiftLat = config.center.latitude - mid('lat');
-  const shiftLng = config.center.longitude - mid('lng');
-  const placed = layout.map((g) => ({ ...g, lat: +(g.lat + shiftLat).toFixed(7), lng: +(g.lng + shiftLng).toFixed(7) }));
-  const lats = placed.map((g) => g.lat);
-  const lngs = placed.map((g) => g.lng);
+  const placed = generateLayout(config.center, 1);
+  const lats = placed.map((g) => g.latitude);
+  const lngs = placed.map((g) => g.longitude);
   const bounds = {
     minLat: +(Math.min(...lats) - BOUNDARY_PAD).toFixed(7),
     maxLat: +(Math.max(...lats) + BOUNDARY_PAD).toFixed(7),
     minLng: +(Math.min(...lngs) - BOUNDARY_PAD).toFixed(7),
     maxLng: +(Math.max(...lngs) + BOUNDARY_PAD).toFixed(7),
   };
+  const ring = [
+    [bounds.minLng, bounds.minLat],
+    [bounds.maxLng, bounds.minLat],
+    [bounds.maxLng, bounds.maxLat],
+    [bounds.minLng, bounds.maxLat],
+    [bounds.minLng, bounds.minLat],
+  ];
 
-  db.prepare('INSERT INTO cemeteries (id, name, description, bounds) VALUES (1, ?, ?, ?)').run(
+  db.prepare('INSERT INTO cemeteries (id, name, description, bounds, boundary) VALUES (1, ?, ?, ?, ?)').run(
     config.name,
     config.description,
-    JSON.stringify(bounds)
+    JSON.stringify(bounds),
+    JSON.stringify(ring)
   );
 
   const insertGrave = db.prepare(
     'INSERT INTO graves (cemetery_id, section, block, row, grave_number, latitude, longitude, status) VALUES (1,?,?,?,?,?,?, \'available\')'
   );
-  placed.forEach((g) => insertGrave.run(g.section, g.block, g.row, g.number, g.lat, g.lng));
+  placed.forEach((g) => insertGrave.run(g.section, g.block, g.row, g.number, g.latitude, g.longitude));
 
   const findGrave = db.prepare('SELECT id FROM graves WHERE section=? AND block=? AND row=? AND grave_number LIKE ?');
   const insertRecord = db.prepare(

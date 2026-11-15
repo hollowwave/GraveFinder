@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const db = require('./db');
+const { generateLayout } = require('./layout');
 
 const app = express();
 app.use(cors());
@@ -66,45 +67,159 @@ app.post('/api/login', (req, res) => {
   res.json({ token, username: user.username });
 });
 
-const getBounds = () => {
-  const stored = db.prepare('SELECT bounds FROM cemeteries LIMIT 1').get();
-  if (stored && stored.bounds) return JSON.parse(stored.bounds);
+const rectRing = (b) => [
+  [b.minLng, b.minLat],
+  [b.maxLng, b.minLat],
+  [b.maxLng, b.maxLat],
+  [b.minLng, b.maxLat],
+  [b.minLng, b.minLat],
+];
+
+const ringBounds = (ring) => {
+  const lats = ring.map((p) => p[1]);
+  const lngs = ring.map((p) => p[0]);
+  return { minLat: Math.min(...lats), maxLat: Math.max(...lats), minLng: Math.min(...lngs), maxLng: Math.max(...lngs) };
+};
+
+const inRing = (lat, lng, ring) => {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+};
+
+const centroid = (ring) => {
+  const [ox, oy] = ring[0];
+  let a = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const x0 = ring[i][0] - ox;
+    const y0 = ring[i][1] - oy;
+    const x1 = ring[i + 1][0] - ox;
+    const y1 = ring[i + 1][1] - oy;
+    const f = x0 * y1 - x1 * y0;
+    a += f;
+    cx += (x0 + x1) * f;
+    cy += (y0 + y1) * f;
+  }
+  a /= 2;
+  return { longitude: ox + cx / (6 * a), latitude: oy + cy / (6 * a) };
+};
+
+const orient = (a, b, c) => Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+const crosses = (a, b, c, d) => orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0;
+
+const parseRing = (input) => {
+  if (!Array.isArray(input)) return { error: 'The boundary must be a list of points' };
+  let pts = input.map((p) => [Number(p && p[0]), Number(p && p[1])]);
+  if (pts.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || Math.abs(p[1]) > 90 || Math.abs(p[0]) > 180))
+    return { error: 'Every point needs a valid latitude and longitude' };
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1];
+  if (pts.length > 1 && same(pts[0], pts[pts.length - 1])) pts.pop();
+  pts = pts.filter((p, i) => i === 0 || !same(p, pts[i - 1]));
+  if (pts.length < 3) return { error: 'A boundary needs at least 3 different points' };
+  const b = ringBounds(pts);
+  if (b.maxLat - b.minLat > 0.02 || b.maxLng - b.minLng > 0.02) return { error: 'That boundary is too large for one cemetery' };
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (j === i + 1 || (i === 0 && j === n - 1)) continue;
+      if (crosses(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) return { error: 'The boundary lines cross each other. Move or delete a point.' };
+    }
+  }
+  const closed = [...pts, pts[0]];
+  const c = centroid(closed);
+  if (!Number.isFinite(c.latitude)) return { error: 'The points do not enclose an area' };
+  return { ring: closed };
+};
+
+const getBoundary = () => {
+  const row = db.prepare('SELECT bounds, boundary FROM cemeteries LIMIT 1').get();
+  if (row && row.boundary) return JSON.parse(row.boundary);
+  if (row && row.bounds) return rectRing(JSON.parse(row.bounds));
   const a = db.prepare('SELECT MIN(latitude) minLat, MAX(latitude) maxLat, MIN(longitude) minLng, MAX(longitude) maxLng FROM graves').get();
   const pad = 0.00006;
-  return { minLat: a.minLat - pad, maxLat: a.maxLat + pad, minLng: a.minLng - pad, maxLng: a.maxLng + pad };
+  return rectRing({ minLat: a.minLat - pad, maxLat: a.maxLat + pad, minLng: a.minLng - pad, maxLng: a.maxLng + pad });
 };
 
-const checkLocation = (lat, lng) => {
-  const b = getBounds();
-  if (lat < b.minLat || lat > b.maxLat || lng < b.minLng || lng > b.maxLng)
-    return 'That location is outside the cemetery boundary';
-  return null;
+const checkLocation = (lat, lng) => (inRing(lat, lng, getBoundary()) ? null : 'That location is outside the cemetery boundary');
+
+const GRID_NUMBER = /^[A-D][12]-R[1-3]-0[1-4]$/;
+
+const relayoutInside = (ring, graves) => {
+  const c = centroid(ring);
+  for (let f = 1; f > 0.05; f *= 0.9) {
+    const layout = generateLayout(c, f);
+    if (layout.every((p) => inRing(p.latitude, p.longitude, ring))) {
+      const byNumber = new Map(layout.map((p) => [p.number, p]));
+      return {
+        updates: graves.filter((g) => GRID_NUMBER.test(g.grave_number) && byNumber.has(g.grave_number)).map((g) => ({ id: g.id, ...byNumber.get(g.grave_number) })),
+      };
+    }
+  }
+  return { error: 'The new boundary is too small or too narrow to fit the sample graves inside it.' };
 };
 
-app.get('/api/cemetery', (req, res) => {
+const cemeteryPayload = () => {
   const cemetery = db.prepare('SELECT id, name, description FROM cemeteries LIMIT 1').get();
   const rows = db.prepare(`
     SELECT section, MIN(latitude) minLat, MAX(latitude) maxLat, MIN(longitude) minLng, MAX(longitude) maxLng
     FROM graves GROUP BY section ORDER BY section`).all();
-  const pad = 0.00002;
-  const ring = (a, b, c, d) => [[[a, b], [c, b], [c, d], [a, d], [a, b]]];
+  const pts = db.prepare('SELECT latitude, longitude FROM graves').all();
+  let nearest = Infinity;
+  for (let i = 0; i < pts.length; i++)
+    for (let j = i + 1; j < pts.length; j++)
+      nearest = Math.min(nearest, Math.hypot(pts[i].latitude - pts[j].latitude, pts[i].longitude - pts[j].longitude));
+  const pad = Math.min(0.00002, nearest * 0.67);
   const sections = rows.map((s) => ({
     type: 'Feature',
     properties: { kind: 'section', section: s.section },
-    geometry: { type: 'Polygon', coordinates: ring(s.minLng - pad, s.minLat - pad, s.maxLng + pad, s.maxLat + pad) },
+    geometry: { type: 'Polygon', coordinates: [rectRing({ minLat: s.minLat - pad, maxLat: s.maxLat + pad, minLng: s.minLng - pad, maxLng: s.maxLng + pad })] },
   }));
-  const bounds = getBounds();
-  const boundary = {
-    type: 'Feature',
-    properties: { kind: 'boundary', name: cemetery.name },
-    geometry: { type: 'Polygon', coordinates: ring(bounds.minLng, bounds.minLat, bounds.maxLng, bounds.maxLat) },
-  };
-  res.json({
+  const ring = getBoundary();
+  const bounds = ringBounds(ring);
+  const boundary = { type: 'Feature', properties: { kind: 'boundary', name: cemetery.name }, geometry: { type: 'Polygon', coordinates: [ring] } };
+  return {
     ...cemetery,
     center: { latitude: (bounds.minLat + bounds.maxLat) / 2, longitude: (bounds.minLng + bounds.maxLng) / 2 },
     bounds,
     geojson: { type: 'FeatureCollection', features: [boundary, ...sections] },
+  };
+};
+
+app.get('/api/cemetery', (req, res) => res.json(cemeteryPayload()));
+
+app.put('/api/cemetery/boundary', requireAdmin, (req, res) => {
+  const parsed = parseRing(req.body && req.body.ring);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const ring = parsed.ring;
+  const graves = db.prepare('SELECT id, grave_number, latitude, longitude FROM graves').all();
+  let updates = [];
+  if (req.body.relayout) {
+    const r = relayoutInside(ring, graves);
+    if (r.error) return res.status(400).json({ error: r.error });
+    updates = r.updates;
+  }
+  const moved = new Map(updates.map((u) => [u.id, u]));
+  const outside = graves.filter((g) => {
+    const p = moved.get(g.id) || { latitude: g.latitude, longitude: g.longitude };
+    return !inRing(p.latitude, p.longitude, ring);
   });
+  if (outside.length)
+    return res.status(409).json({
+      error: `${outside.length} grave${outside.length === 1 ? '' : 's'} would fall outside the new boundary (for example ${outside[0].grave_number}). Tick "Move the sample graves inside" or adjust the shape.`,
+      outside: outside.length,
+    });
+  db.transaction(() => {
+    const upd = db.prepare('UPDATE graves SET latitude=?, longitude=? WHERE id=?');
+    updates.forEach((u) => upd.run(u.latitude, u.longitude, u.id));
+    db.prepare('UPDATE cemeteries SET boundary=?, bounds=? WHERE id=(SELECT id FROM cemeteries LIMIT 1)').run(JSON.stringify(ring), JSON.stringify(ringBounds(ring)));
+  })();
+  res.json(cemeteryPayload());
 });
 
 app.get('/api/stats', (req, res) => {

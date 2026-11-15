@@ -4,10 +4,12 @@ import 'leaflet/dist/leaflet.css';
 
 const COLORS = { occupied: '#8c3b34', available: '#ffffff', selected: '#e0a100' };
 
-export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin }) {
+export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, locked = true, draft, onDraftMove, onDraftRemove }) {
   const el = useRef();
   const map = useRef();
   const layer = useRef();
+  const draftLayer = useRef();
+  const lock = useRef({});
   const clickRef = useRef();
   clickRef.current = onMapClick;
 
@@ -21,8 +23,7 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
     const b = cemetery.bounds;
     const area = L.latLngBounds([b.minLat, b.minLng], [b.maxLat, b.maxLng]);
     m.fitBounds(area);
-    m.setMinZoom(m.getZoom());
-    m.setMaxBounds(area.pad(0.25));
+    lock.current = { zoom: m.getZoom(), bounds: area.pad(0.25) };
     m.options.maxBoundsViscosity = 1;
     L.geoJSON(cemetery.geojson, {
       style: (f) =>
@@ -38,6 +39,7 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
       },
     }).addTo(m);
     layer.current = L.layerGroup().addTo(m);
+    draftLayer.current = L.layerGroup().addTo(m);
     m.on('click', (e) => clickRef.current && clickRef.current(e.latlng));
     map.current = m;
     return () => m.remove();
@@ -64,8 +66,34 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
     if (pin) {
       L.circleMarker([pin.latitude, pin.longitude], { radius: 8, weight: 3, color: '#1c2623', fillColor: '#ffffff', fillOpacity: 0.6 }).addTo(layer.current);
     }
-  }, [graves, selectedId, pin, onSelect]);
+  }, [graves, selectedId, pin, onSelect, cemetery]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (locked) {
+      m.setMinZoom(lock.current.zoom);
+      m.setMaxBounds(lock.current.bounds);
+    } else {
+      m.setMinZoom(0);
+      m.setMaxBounds(null);
+    }
+  }, [locked, cemetery]);
+
+  useEffect(() => {
+    const g = draftLayer.current;
+    g.clearLayers();
+    if (!draft || !draft.length) return;
+    const pts = draft.map((p) => [p.latitude, p.longitude]);
+    const style = { color: '#b07d00', weight: 2, dashArray: '5 4', fillColor: '#e0a100', fillOpacity: 0.15, interactive: false };
+    (pts.length >= 3 ? L.polygon(pts, style) : L.polyline(pts, style)).addTo(g);
+    pts.forEach((pt, i) => {
+      const mk = L.marker(pt, { draggable: true, icon: L.divIcon({ className: 'vertex', iconSize: [16, 16] }) });
+      mk.bindTooltip(String(i + 1), { permanent: true, direction: 'top', offset: [0, -8], className: 'vertex-label' });
+      mk.on('dragend', (e) => onDraftMove && onDraftMove(i, e.target.getLatLng()));
+      mk.on('contextmenu', () => onDraftRemove && onDraftRemove(i));
+      mk.addTo(g);
+    });
+  }, [draft, cemetery, onDraftMove, onDraftRemove]);
 
   return <div ref={el} className="map" />;
 }
-
