@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import MapView, { UrlTile, Polygon, Polyline, Circle, Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { get } from '../api';
+import { API, get } from '../api';
 import { distance, direction } from '../geo';
 import { colors } from '../theme';
 
@@ -110,7 +110,7 @@ export default function CemeteryMap({ route }) {
         onPress={onMapPress}
         toolbarEnabled={false}
       >
-        <UrlTile urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png" maximumZ={19} shouldReplaceMapContent />
+        <UrlTile urlTemplate={`${API}/tiles/{z}/{x}/{y}.png`} maximumZ={19} shouldReplaceMapContent />
         {boundary && (
           <Polygon coordinates={toCoords(boundary.geometry.coordinates[0])} strokeColor={colors.moss} strokeWidth={2} fillColor="transparent" lineDashPattern={[8, 6]} />
         )}
