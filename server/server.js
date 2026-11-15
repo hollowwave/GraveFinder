@@ -264,16 +264,47 @@ app.post('/api/graves', requireAdmin, (req, res) => {
   }
 });
 
+const GRAVE_FIELDS = ['section', 'block', 'row', 'grave_number'];
+
 app.put('/api/graves/:id', requireAdmin, (req, res) => {
   const grave = db.prepare('SELECT * FROM graves WHERE id=?').get(req.params.id);
   if (!grave) return res.status(404).json({ error: 'Grave not found' });
-  const { latitude, longitude } = req.body || {};
-  if (isNaN(latitude) || isNaN(longitude) || latitude === '' || longitude === '' || latitude == null || longitude == null)
-    return res.status(400).json({ error: 'latitude and longitude are required' });
-  const outside = checkLocation(Number(latitude), Number(longitude));
-  if (outside) return res.status(400).json({ error: outside });
-  db.prepare('UPDATE graves SET latitude=?, longitude=? WHERE id=?').run(Number(latitude), Number(longitude), grave.id);
+  const body = req.body || {};
+  const hasPosition = body.latitude !== undefined || body.longitude !== undefined;
+  const hasDetails = GRAVE_FIELDS.some((k) => body[k] !== undefined);
+  if (!hasPosition && !hasDetails) return res.status(400).json({ error: 'Nothing to update' });
+  let { latitude, longitude } = grave;
+  if (hasPosition) {
+    if (isNaN(body.latitude) || isNaN(body.longitude) || body.latitude === '' || body.longitude === '' || body.latitude == null || body.longitude == null)
+      return res.status(400).json({ error: 'latitude and longitude are required' });
+    latitude = Number(body.latitude);
+    longitude = Number(body.longitude);
+    const outside = checkLocation(latitude, longitude);
+    if (outside) return res.status(400).json({ error: outside });
+  }
+  const next = {};
+  for (const k of GRAVE_FIELDS) {
+    next[k] = body[k] !== undefined ? String(body[k]).trim() : grave[k];
+    if (!next[k]) return res.status(400).json({ error: `${k.replace('_', ' ')} is required` });
+  }
+  try {
+    db.prepare('UPDATE graves SET section=?, block=?, row=?, grave_number=?, latitude=?, longitude=? WHERE id=?').run(
+      next.section, next.block, next.row, next.grave_number, latitude, longitude, grave.id
+    );
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'Grave number already exists' });
+    throw e;
+  }
   res.json(db.prepare('SELECT * FROM graves WHERE id=?').get(grave.id));
+});
+
+app.delete('/api/graves/:id', requireAdmin, (req, res) => {
+  const grave = db.prepare('SELECT id FROM graves WHERE id=?').get(req.params.id);
+  if (!grave) return res.status(404).json({ error: 'Grave not found' });
+  const taken = db.prepare('SELECT id FROM burial_records WHERE grave_id=?').get(grave.id);
+  if (taken) return res.status(409).json({ error: 'This grave has a burial record. Remove the assignment first.' });
+  db.prepare('DELETE FROM graves WHERE id=?').run(grave.id);
+  res.status(204).end();
 });
 
 app.get('/api/records', (req, res) => {
@@ -351,6 +382,49 @@ app.delete('/api/records/:id', requireAdmin, (req, res) => {
   })();
   if (!info.changes) return res.status(404).json({ error: 'Record not found' });
   res.status(204).end();
+});
+
+const fs = require('fs');
+const path = require('path');
+
+const TILE_DIR = path.join(__dirname, 'tile-cache');
+const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-AcademicPrototype/1.0 (contact: CHANGE-ME@example.com)';
+const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+let tileActive = 0;
+const tileQueue = [];
+const tileSlot = () => new Promise((resolve) => (tileActive < 2 ? (tileActive++, resolve()) : tileQueue.push(resolve)));
+const tileRelease = () => {
+  const next = tileQueue.shift();
+  if (next) next();
+  else tileActive--;
+};
+
+app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
+  const z = Number(req.params.z);
+  const x = Number(req.params.x);
+  const y = Number(req.params.y);
+  const max = 2 ** z;
+  if (![z, x, y].every(Number.isInteger) || z < 0 || z > 19 || x < 0 || y < 0 || x >= max || y >= max) return res.status(400).end();
+  const file = path.join(TILE_DIR, String(z), String(x), `${y}.png`);
+  res.set('Cache-Control', 'public, max-age=86400');
+  try {
+    const stat = fs.statSync(file);
+    if (Date.now() - stat.mtimeMs < TILE_MAX_AGE_MS) return res.type('png').send(fs.readFileSync(file));
+  } catch {}
+  await tileSlot();
+  try {
+    const upstream = await fetch(`https://tile.openstreetmap.org/${z}/${x}/${y}.png`, { headers: { 'User-Agent': TILE_UA } });
+    if (!upstream.ok) return res.status(502).end();
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, buf);
+    res.type('png').send(buf);
+  } catch {
+    if (fs.existsSync(file)) return res.type('png').send(fs.readFileSync(file));
+    res.status(502).end();
+  } finally {
+    tileRelease();
+  }
 });
 
 app.use((err, req, res, next) => {

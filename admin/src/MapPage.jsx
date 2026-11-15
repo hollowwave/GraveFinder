@@ -3,6 +3,7 @@ import { api } from './api';
 import MapView from './MapView';
 import { pointInRing } from './geo';
 
+const GRAVE_LABELS = [['section', 'Section'], ['block', 'Block'], ['row', 'Row'], ['grave_number', 'Grave number']];
 const round = (n) => Math.round(n * 1e7) / 1e7;
 
 export default function MapPage({ cemetery, onCemeteryChange }) {
@@ -12,6 +13,8 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const [mode, setMode] = useState('select');
   const [coords, setCoords] = useState({ latitude: '', longitude: '' });
   const [nf, setNf] = useState({ section: 'A', block: '1', row: '1', grave_number: '' });
+  const [ef, setEf] = useState({ section: '', block: '', row: '', grave_number: '' });
+  const [confirmDel, setConfirmDel] = useState(false);
   const [recordId, setRecordId] = useState('');
   const [msg, setMsg] = useState('');
   const [draft, setDraft] = useState(null);
@@ -31,6 +34,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
     setSelId(g.id);
     setCoords({ latitude: g.latitude, longitude: g.longitude });
     setMode('select');
+    setConfirmDel(false);
     setMsg('');
   }, []);
 
@@ -38,10 +42,11 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
     (ll) => {
       if (!pointInRing(ll.lat, ll.lng, ring)) {
         setMsg('That spot is outside the cemetery boundary. Click inside the dashed line.');
-        return;
+        return false;
       }
       setMsg('');
       setCoords({ latitude: round(ll.lat), longitude: round(ll.lng) });
+      return true;
     },
     [ring]
   );
@@ -52,7 +57,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
 
   const onGraveClick = useCallback(
     (g, ll) => {
-      if (mode === 'select') pick(g);
+      if (mode === 'select' || mode === 'edit') pick(g);
       else if (mode === 'boundary') addPoint(ll);
       else placeAt(ll);
     },
@@ -62,7 +67,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const onMapClick = useCallback(
     (ll) => {
       if (mode === 'boundary') addPoint(ll);
-      else if (mode !== 'select') placeAt(ll);
+      else if (mode === 'move' || mode === 'add') placeAt(ll);
     },
     [mode, placeAt, addPoint]
   );
@@ -117,6 +122,22 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
       setMode('select');
     }, 'Grave added');
 
+  const startEdit = () => {
+    setEf({ section: grave.section, block: grave.block, row: grave.row, grave_number: grave.grave_number });
+    setMode('edit');
+    setMsg('');
+  };
+
+  const saveDetails = () => guard(() => api('/graves/' + grave.id, { method: 'PUT', body: ef }).then(() => setMode('select')), 'Grave details saved');
+
+  const deleteGrave = () =>
+    guard(async () => {
+      await api('/graves/' + grave.id, { method: 'DELETE' });
+      setSelId(null);
+      setConfirmDel(false);
+      setCoords({ latitude: '', longitude: '' });
+    }, 'Grave deleted');
+
   const assign = () =>
     guard(() => api(`/records/${recordId}/grave`, { method: 'PUT', body: { grave_id: grave.id } }).then(() => setRecordId('')), 'Grave assigned');
 
@@ -132,7 +153,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
       </header>
       <div className="mapgrid">
         <div>
-          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin}
+          <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} onPinMove={placeAt}
             locked={mode !== 'boundary'} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint} />
           <p className="legend muted">
             <span className="dot occ" /> Occupied ({occupied})
@@ -143,7 +164,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
         <aside className="panel">
           {msg && <p className="notice">{msg}</p>}
           {mode === 'select' && !grave && <p className="muted">Select a grave on the map to see who is buried there, move it, or assign a record.</p>}
-          {mode !== 'boundary' && grave && (
+          {mode !== 'boundary' && grave && mode !== 'edit' && (
             <section>
               <h2>{grave.grave_number}</h2>
               <p className="muted">Section {grave.section}, block {grave.block}, row {grave.row}</p>
@@ -159,9 +180,41 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
                   <button disabled={!recordId} onClick={assign}>Assign</button>
                 </div>
               )}
+              {mode === 'select' && (
+                <div className="inline">
+                  <button className="secondary" onClick={startEdit}>Edit details</button>
+                  {grave.status === 'available' && !confirmDel && <button className="secondary" onClick={() => setConfirmDel(true)}>Delete grave</button>}
+                </div>
+              )}
+              {mode === 'select' && confirmDel && (
+                <>
+                  <p className="muted">Delete {grave.grave_number} permanently?</p>
+                  <div className="actions">
+                    <button className="secondary" onClick={() => setConfirmDel(false)}>Cancel</button>
+                    <button onClick={deleteGrave}>Yes, delete</button>
+                  </div>
+                </>
+              )}
             </section>
           )}
-          {mode !== 'boundary' && (
+          {mode === 'edit' && grave && (
+            <section>
+              <h2>Edit grave details</h2>
+              <div className="row2">
+                {GRAVE_LABELS.map(([k, label]) => (
+                  <label key={k}>
+                    {label}
+                    <input value={ef[k]} onChange={(e) => setEf({ ...ef, [k]: e.target.value })} />
+                  </label>
+                ))}
+              </div>
+              <div className="actions">
+                <button className="secondary" onClick={() => setMode('select')}>Cancel</button>
+                <button disabled={GRAVE_LABELS.some(([k]) => !ef[k].trim())} onClick={saveDetails}>Save details</button>
+              </div>
+            </section>
+          )}
+          {mode !== 'boundary' && mode !== 'edit' && (
           <section>
             <h2>{mode === 'add' ? 'Add a grave' : 'Coordinates'}</h2>
             {mode === 'add' && (
@@ -187,7 +240,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
             {mode === 'select' && grave && <button className="secondary" onClick={() => setMode('move')}>Move this grave</button>}
             {mode === 'move' && (
               <>
-                <p className="muted">Click the new position on the map.</p>
+                <p className="muted">Drag the marker or click the new position on the map.</p>
                 <div className="actions">
                   <button className="secondary" onClick={() => pick(grave)}>Cancel</button>
                   <button onClick={saveCoords}>Save coordinates</button>
@@ -196,7 +249,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
             )}
             {mode === 'add' && (
               <>
-                <p className="muted">Click the position on the map, then add the grave.</p>
+                <p className="muted">Click the position on the map (you can drag the marker to adjust), then add the grave.</p>
                 <div className="actions">
                   <button className="secondary" onClick={() => setMode('select')}>Cancel</button>
                   <button disabled={!nf.grave_number || coords.latitude === ''} onClick={addGrave}>Add grave</button>

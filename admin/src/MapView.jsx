@@ -4,7 +4,7 @@ import 'leaflet/dist/leaflet.css';
 
 const COLORS = { occupied: '#8c3b34', available: '#ffffff', selected: '#e0a100' };
 
-export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, locked = true, draft, onDraftMove, onDraftRemove }) {
+export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove }) {
   const el = useRef();
   const map = useRef();
   const layer = useRef();
@@ -12,10 +12,12 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
   const lock = useRef({});
   const clickRef = useRef();
   clickRef.current = onMapClick;
+  const pinMoveRef = useRef();
+  pinMoveRef.current = onPinMove;
 
   useEffect(() => {
     const m = L.map(el.current, { maxZoom: 22, zoomSnap: 0.25 });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer('/api/tiles/{z}/{x}/{y}.png', {
       maxZoom: 22,
       maxNativeZoom: 19,
       attribution: '© OpenStreetMap contributors',
@@ -64,7 +66,12 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
       m.addTo(layer.current);
     });
     if (pin) {
-      L.circleMarker([pin.latitude, pin.longitude], { radius: 8, weight: 3, color: '#1c2623', fillColor: '#ffffff', fillOpacity: 0.6 }).addTo(layer.current);
+      const mk = L.marker([pin.latitude, pin.longitude], { draggable: true, icon: L.divIcon({ className: 'vertex', iconSize: [16, 16] }) });
+      mk.on('dragend', (e) => {
+        const ok = pinMoveRef.current && pinMoveRef.current(e.target.getLatLng());
+        if (!ok) e.target.setLatLng([pin.latitude, pin.longitude]);
+      });
+      mk.addTo(layer.current);
     }
   }, [graves, selectedId, pin, onSelect, cemetery]);
 
