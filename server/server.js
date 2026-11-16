@@ -389,6 +389,7 @@ const path = require('path');
 
 const TILE_DIR = path.join(__dirname, 'tile-cache');
 const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-AcademicPrototype/1.0 (contact: CHANGE-ME@example.com)';
+if (!process.env.TILE_USER_AGENT) console.warn('[tiles] TILE_USER_AGENT is not set; OSM may refuse the placeholder contact. Set it to your own email or project URL.');
 const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 let tileActive = 0;
 const tileQueue = [];
@@ -413,13 +414,30 @@ app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
   } catch {}
   await tileSlot();
   try {
-    const upstream = await fetch(`https://tile.openstreetmap.org/${z}/${x}/${y}.png`, { headers: { 'User-Agent': TILE_UA } });
-    if (!upstream.ok) return res.status(502).end();
+    let upstream;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        upstream = await fetch(`https://tile.openstreetmap.org/${z}/${x}/${y}.png`, {
+          headers: { 'User-Agent': TILE_UA },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (upstream.ok || upstream.status === 403 || upstream.status === 429) break;
+      } catch (e) {
+        console.warn(`[tiles] attempt ${attempt} failed for ${z}/${x}/${y}: ${e.message}`);
+        if (attempt === 2) throw e;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!upstream.ok) {
+      console.warn(`[tiles] OSM refused ${z}/${x}/${y}: HTTP ${upstream.status} (User-Agent: ${TILE_UA})`);
+      return res.status(502).end();
+    }
     const buf = Buffer.from(await upstream.arrayBuffer());
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, buf);
     res.type('png').send(buf);
-  } catch {
+  } catch (e) {
+    console.warn(`[tiles] fetch failed for ${z}/${x}/${y}: ${e.message}`);
     if (fs.existsSync(file)) return res.type('png').send(fs.readFileSync(file));
     res.status(502).end();
   } finally {
