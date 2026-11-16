@@ -164,15 +164,15 @@ const relayoutInside = (ring, graves) => {
   return { error: 'The new boundary is too small or too narrow to fit the sample graves inside it.' };
 };
 
-const cemeteryPayload = () => {
+const buildCemeteryPayload = () => {
   const cemetery = db.prepare('SELECT id, name, description FROM cemeteries LIMIT 1').get();
   const rows = db.prepare(`
     SELECT section, MIN(latitude) minLat, MAX(latitude) maxLat, MIN(longitude) minLng, MAX(longitude) maxLng
     FROM graves GROUP BY section ORDER BY section`).all();
-  const pts = db.prepare('SELECT latitude, longitude FROM graves').all();
+  const pts = db.prepare('SELECT latitude, longitude FROM graves ORDER BY latitude').all();
   let nearest = Infinity;
   for (let i = 0; i < pts.length; i++)
-    for (let j = i + 1; j < pts.length; j++)
+    for (let j = i + 1; j < pts.length && pts[j].latitude - pts[i].latitude < nearest; j++)
       nearest = Math.min(nearest, Math.hypot(pts[i].latitude - pts[j].latitude, pts[i].longitude - pts[j].longitude));
   const pad = Math.min(0.00002, nearest * 0.67);
   const sections = rows.map((s) => ({
@@ -189,6 +189,12 @@ const cemeteryPayload = () => {
     bounds,
     geojson: { type: 'FeatureCollection', features: [boundary, ...sections] },
   };
+};
+
+let cemeteryCache = null;
+const cemeteryPayload = () => cemeteryCache || (cemeteryCache = buildCemeteryPayload());
+const invalidateCemetery = () => {
+  cemeteryCache = null;
 };
 
 app.get('/api/cemetery', (req, res) => res.json(cemeteryPayload()));
@@ -219,6 +225,7 @@ app.put('/api/cemetery/boundary', requireAdmin, (req, res) => {
     updates.forEach((u) => upd.run(u.latitude, u.longitude, u.id));
     db.prepare('UPDATE cemeteries SET boundary=?, bounds=? WHERE id=(SELECT id FROM cemeteries LIMIT 1)').run(JSON.stringify(ring), JSON.stringify(ringBounds(ring)));
   })();
+  invalidateCemetery();
   res.json(cemeteryPayload());
 });
 
@@ -257,6 +264,7 @@ app.post('/api/graves', requireAdmin, (req, res) => {
     const info = db.prepare(
       "INSERT INTO graves (cemetery_id, section, block, row, grave_number, latitude, longitude, status) VALUES (1,?,?,?,?,?,?, 'available')"
     ).run(section, String(block), String(row), grave_number, Number(latitude), Number(longitude));
+    invalidateCemetery();
     res.status(201).json(db.prepare('SELECT * FROM graves WHERE id=?').get(info.lastInsertRowid));
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'Grave number already exists' });
@@ -295,6 +303,7 @@ app.put('/api/graves/:id', requireAdmin, (req, res) => {
     if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'Grave number already exists' });
     throw e;
   }
+  invalidateCemetery();
   res.json(db.prepare('SELECT * FROM graves WHERE id=?').get(grave.id));
 });
 
@@ -304,6 +313,7 @@ app.delete('/api/graves/:id', requireAdmin, (req, res) => {
   const taken = db.prepare('SELECT id FROM burial_records WHERE grave_id=?').get(grave.id);
   if (taken) return res.status(409).json({ error: 'This grave has a burial record. Remove the assignment first.' });
   db.prepare('DELETE FROM graves WHERE id=?').run(grave.id);
+  invalidateCemetery();
   res.status(204).end();
 });
 
@@ -391,6 +401,7 @@ const TILE_DIR = path.join(__dirname, 'tile-cache');
 const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-AcademicPrototype/1.0 (contact: CHANGE-ME@example.com)';
 if (!process.env.TILE_USER_AGENT) console.warn('[tiles] TILE_USER_AGENT is not set; OSM may refuse the placeholder contact. Set it to your own email or project URL.');
 const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
 let tileActive = 0;
 const tileQueue = [];
 const tileSlot = () => new Promise((resolve) => (tileActive < 2 ? (tileActive++, resolve()) : tileQueue.push(resolve)));
@@ -400,18 +411,9 @@ const tileRelease = () => {
   else tileActive--;
 };
 
-app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
-  const z = Number(req.params.z);
-  const x = Number(req.params.x);
-  const y = Number(req.params.y);
-  const max = 2 ** z;
-  if (![z, x, y].every(Number.isInteger) || z < 0 || z > 19 || x < 0 || y < 0 || x >= max || y >= max) return res.status(400).end();
-  const file = path.join(TILE_DIR, String(z), String(x), `${y}.png`);
-  res.set('Cache-Control', 'public, max-age=86400');
-  try {
-    const stat = fs.statSync(file);
-    if (Date.now() - stat.mtimeMs < TILE_MAX_AGE_MS) return res.type('png').send(fs.readFileSync(file));
-  } catch {}
+const tileInflight = new Map();
+
+async function fetchTile(z, x, y, file) {
   await tileSlot();
   try {
     let upstream;
@@ -430,18 +432,49 @@ app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
     }
     if (!upstream.ok) {
       console.warn(`[tiles] OSM refused ${z}/${x}/${y}: HTTP ${upstream.status} (User-Agent: ${TILE_UA})`);
-      return res.status(502).end();
+      throw new Error(`OSM HTTP ${upstream.status}`);
     }
     const buf = Buffer.from(await upstream.arrayBuffer());
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, buf);
-    res.type('png').send(buf);
-  } catch (e) {
-    console.warn(`[tiles] fetch failed for ${z}/${x}/${y}: ${e.message}`);
-    if (fs.existsSync(file)) return res.type('png').send(fs.readFileSync(file));
-    res.status(502).end();
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fs.promises.writeFile(tmp, buf);
+    await fs.promises.rename(tmp, file);
+    return buf;
   } finally {
     tileRelease();
+  }
+}
+
+app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
+  const z = Number(req.params.z);
+  const x = Number(req.params.x);
+  const y = Number(req.params.y);
+  const max = 2 ** z;
+  if (![z, x, y].every(Number.isInteger) || z < 0 || z > 19 || x < 0 || y < 0 || x >= max || y >= max) return res.status(400).end();
+  const file = path.join(TILE_DIR, String(z), String(x), `${y}.png`);
+  const sendCached = () =>
+    res.sendFile(file, { maxAge: '7d' }, (err) => {
+      if (err && !res.headersSent) res.status(502).end();
+    });
+
+  let stat = null;
+  try {
+    stat = await fs.promises.stat(file);
+  } catch {}
+  if (stat && Date.now() - stat.mtimeMs < TILE_MAX_AGE_MS) return sendCached();
+
+  let pending = tileInflight.get(file);
+  if (!pending) {
+    pending = fetchTile(z, x, y, file).finally(() => tileInflight.delete(file));
+    tileInflight.set(file, pending);
+  }
+  try {
+    const buf = await pending;
+    res.set('Cache-Control', 'public, max-age=604800').type('png').send(buf);
+  } catch (e) {
+    if (!/^OSM HTTP/.test(e.message)) console.warn(`[tiles] fetch failed for ${z}/${x}/${y}: ${e.message}`);
+    if (stat) return sendCached();
+    res.status(502).end();
   }
 });
 

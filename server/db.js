@@ -3,6 +3,7 @@ const path = require('path');
 
 const db = new Database(path.join(__dirname, 'gravefinder.db'));
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_graves_section ON graves(section);
 CREATE INDEX IF NOT EXISTS idx_records_name ON burial_records(full_name COLLATE NOCASE);
 `);
 
