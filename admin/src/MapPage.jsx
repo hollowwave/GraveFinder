@@ -19,11 +19,15 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const [msg, setMsg] = useState('');
   const [draft, setDraft] = useState(null);
   const [relayout, setRelayout] = useState(false);
+  const [roads, setRoads] = useState({ nodes: [], edges: [] });
+  const [pendingNodeId, setPendingNodeId] = useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
   const ring = cemetery.geojson.features.find((f) => f.properties.kind === 'boundary').geometry.coordinates[0];
 
   const load = useCallback(() => {
     api('/graves').then(setGraves);
     api('/records?status=unassigned').then(setUnassigned);
+    api('/roads').then(setRoads);
   }, []);
   useEffect(load, [load]);
 
@@ -55,10 +59,14 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const movePoint = useCallback((i, ll) => setDraft((d) => d.map((p, k) => (k === i ? { latitude: round(ll.lat), longitude: round(ll.lng) } : p))), []);
   const removePoint = useCallback((i) => setDraft((d) => d.filter((_, k) => k !== i)), []);
 
+  const addRoadNode = (ll) =>
+    guard(() => api('/roads/nodes', { method: 'POST', body: { latitude: round(ll.lat), longitude: round(ll.lng) } }), 'Point added');
+
   const onGraveClick = useCallback(
     (g, ll) => {
       if (mode === 'select' || mode === 'edit') pick(g);
       else if (mode === 'boundary') addPoint(ll);
+      else if (mode === 'roads') addRoadNode(ll);
       else placeAt(ll);
     },
     [mode, pick, placeAt, addPoint]
@@ -67,6 +75,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const onMapClick = useCallback(
     (ll) => {
       if (mode === 'boundary') addPoint(ll);
+      else if (mode === 'roads') addRoadNode(ll);
       else if (mode === 'move' || mode === 'add') placeAt(ll);
     },
     [mode, placeAt, addPoint]
@@ -101,6 +110,56 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
       flash(e.message);
     }
   };
+
+  const startRoads = () => {
+    setPendingNodeId(null);
+    setSelectedEdgeId(null);
+    setSelId(null);
+    setMode('roads');
+    setMsg('');
+  };
+
+  const exitRoads = () => {
+    setPendingNodeId(null);
+    setSelectedEdgeId(null);
+    setMode('select');
+    setMsg('');
+  };
+
+  const onNodeClick = (n) => {
+    setSelectedEdgeId(null);
+    if (pendingNodeId == null) return setPendingNodeId(n.id);
+    if (pendingNodeId === n.id) return setPendingNodeId(null);
+    guard(() => api('/roads/edges', { method: 'POST', body: { a: pendingNodeId, b: n.id } }), 'Path connected').then(() => setPendingNodeId(null));
+  };
+
+  const moveNode = (id, ll) => {
+    if (!pointInRing(ll.lat, ll.lng, ring)) {
+      setMsg('That spot is outside the cemetery boundary. Drag it back inside the dashed line.');
+      return false;
+    }
+    setMsg('');
+    api('/roads/nodes/' + id, { method: 'PUT', body: { latitude: round(ll.lat), longitude: round(ll.lng) } })
+      .then(load)
+      .catch((e) => {
+        setMsg(e.message);
+        load();
+      });
+    return true;
+  };
+
+  const deleteNode = (id) => {
+    if (pendingNodeId === id) setPendingNodeId(null);
+    guard(() => api('/roads/nodes/' + id, { method: 'DELETE' }), 'Point deleted');
+  };
+
+  const onEdgeClick = (id) => {
+    setPendingNodeId(null);
+    setSelectedEdgeId((cur) => (cur === id ? null : id));
+  };
+
+  const deleteEdge = () =>
+    guard(() => api('/roads/edges/' + selectedEdgeId, { method: 'DELETE' }).then(() => setSelectedEdgeId(null)), 'Path removed');
 
   const guard = async (fn, ok) => {
     try {
@@ -154,11 +213,14 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
       <div className="mapgrid">
         <div>
           <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} onPinMove={placeAt}
-            locked={mode !== 'boundary'} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint} />
+            locked={mode !== 'boundary'} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint}
+            roads={roads} roadMode={mode === 'roads'} pendingNodeId={pendingNodeId} selectedEdgeId={selectedEdgeId}
+            onNodeClick={onNodeClick} onNodeDrag={moveNode} onNodeContext={deleteNode} onEdgeClick={onEdgeClick} />
           <p className="legend muted">
             <span className="dot occ" /> Occupied ({occupied})
             <span className="dot avail" /> Available ({graves.length - occupied})
             <span className="dot sel" /> Selected
+            <span className="dot road" /> Path ({roads.edges.length})
           </p>
         </div>
         <aside className="panel">
@@ -214,7 +276,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
               </div>
             </section>
           )}
-          {mode !== 'boundary' && mode !== 'edit' && (
+          {mode !== 'boundary' && mode !== 'edit' && mode !== 'roads' && (
           <section>
             <h2>{mode === 'add' ? 'Add a grave' : 'Coordinates'}</h2>
             {mode === 'add' && (
@@ -268,6 +330,33 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
               <h2>Cemetery boundary</h2>
               <p className="muted">Redraw the outline when you have a more accurate map or plan.</p>
               <button className="secondary" onClick={startBoundary}>Edit boundary</button>
+            </section>
+          )}
+          {mode === 'select' && (
+            <section>
+              <h2>Cemetery paths</h2>
+              <p className="muted">Draw the walkable paths between graves, used to route visitors to a grave.</p>
+              <button className="secondary" onClick={startRoads}>Edit paths</button>
+            </section>
+          )}
+          {mode === 'roads' && (
+            <section>
+              <h2>Edit paths</h2>
+              <p className="muted">
+                Click empty ground to drop a point. Click two points, one after the other, to connect them with a path. Drag a point to move it.
+                Right-click a point to delete it (its paths go too). Click a path to select it, then remove it below.
+              </p>
+              <p>{roads.nodes.length} point{roads.nodes.length === 1 ? '' : 's'}, {roads.edges.length} path{roads.edges.length === 1 ? '' : 's'}</p>
+              {pendingNodeId != null && <p className="notice">Point selected — click another point to connect it, or the same point again to cancel.</p>}
+              {selectedEdgeId != null && (
+                <div className="actions">
+                  <button className="secondary" onClick={() => setSelectedEdgeId(null)}>Deselect</button>
+                  <button onClick={deleteEdge}>Delete this path</button>
+                </div>
+              )}
+              <div className="actions">
+                <button className="secondary" onClick={exitRoads}>Done</button>
+              </div>
             </section>
           )}
           {mode === 'boundary' && (

@@ -39,8 +39,23 @@ CREATE TABLE IF NOT EXISTS admin_users (
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS road_nodes (
+  id INTEGER PRIMARY KEY,
+  cemetery_id INTEGER NOT NULL REFERENCES cemeteries(id),
+  latitude REAL NOT NULL,
+  longitude REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS road_edges (
+  id INTEGER PRIMARY KEY,
+  cemetery_id INTEGER NOT NULL REFERENCES cemeteries(id),
+  node_a_id INTEGER NOT NULL REFERENCES road_nodes(id) ON DELETE CASCADE,
+  node_b_id INTEGER NOT NULL REFERENCES road_nodes(id) ON DELETE CASCADE,
+  UNIQUE(node_a_id, node_b_id)
+);
 CREATE INDEX IF NOT EXISTS idx_graves_section ON graves(section);
 CREATE INDEX IF NOT EXISTS idx_records_name ON burial_records(full_name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_road_edges_a ON road_edges(node_a_id);
+CREATE INDEX IF NOT EXISTS idx_road_edges_b ON road_edges(node_b_id);
 `);
 
 const cemeteryCols = db.prepare('PRAGMA table_info(cemeteries)').all().map((c) => c.name);

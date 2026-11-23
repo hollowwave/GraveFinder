@@ -1,13 +1,16 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { getRecent } from '../recent';
+import { hasSeenOnboarding, markOnboardingSeen } from '../onboardingStorage';
+import Onboarding from '../Onboarding';
 import { colors } from '../theme';
 
 export default function Home({ navigation }) {
   const [q, setQ] = useState('');
   const [recent, setRecent] = useState([]);
+  const [showHelp, setShowHelp] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -15,12 +18,30 @@ export default function Home({ navigation }) {
     }, [])
   );
 
+  useEffect(() => {
+    hasSeenOnboarding().then((seen) => {
+      if (!seen) setShowHelp(true);
+    });
+  }, []);
+
+  const closeHelp = () => {
+    setShowHelp(false);
+    markOnboardingSeen();
+  };
+
   const search = () => navigation.navigate('Search', { q });
 
   return (
     <SafeAreaView style={s.screen}>
-      <Text style={s.title}>GraveFinder</Text>
-      <Text style={s.sub}>Hardin ng Alaala Memorial Park</Text>
+      <View style={s.headerRow}>
+        <View>
+          <Text style={s.title}>GraveFinder</Text>
+          <Text style={s.sub}>Hardin ng Alaala Memorial Park</Text>
+        </View>
+        <Pressable onPress={() => setShowHelp(true)} hitSlop={10}>
+          <Text style={s.helpLink}>How to use ⓘ</Text>
+        </Pressable>
+      </View>
       <TextInput
         style={s.input}
         placeholder="Search by first or last name"
@@ -48,14 +69,17 @@ export default function Home({ navigation }) {
           ))}
         </View>
       )}
+      <Onboarding visible={showHelp} onClose={closeHelp} />
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 20, paddingTop: 36 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   title: { fontSize: 30, fontWeight: '700', color: colors.moss },
   sub: { color: colors.muted, marginBottom: 28, marginTop: 2 },
+  helpLink: { color: colors.moss, fontSize: 14, fontWeight: '600', marginTop: 6 },
   input: {
     backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 6,
     paddingHorizontal: 14, height: 56, fontSize: 18, color: colors.ink,

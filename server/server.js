@@ -1,8 +1,10 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const db = require('./db');
 const { generateLayout } = require('./layout');
+const { haversine, buildRoute } = require('./routing');
 
 const app = express();
 app.use(cors());
@@ -317,6 +319,85 @@ app.delete('/api/graves/:id', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
+app.get('/api/roads', (req, res) => {
+  const nodes = db.prepare('SELECT id, latitude, longitude FROM road_nodes ORDER BY id').all();
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const edges = db
+    .prepare('SELECT id, node_a_id AS a, node_b_id AS b FROM road_edges ORDER BY id')
+    .all()
+    .map((e) => ({ ...e, length_m: Math.round(haversine(byId.get(e.a), byId.get(e.b))) }));
+  res.json({ nodes, edges });
+});
+
+app.post('/api/roads/nodes', requireAdmin, (req, res) => {
+  const { latitude, longitude } = req.body || {};
+  if (isNaN(latitude) || isNaN(longitude) || latitude === '' || longitude === '')
+    return res.status(400).json({ error: 'latitude and longitude are required' });
+  const outside = checkLocation(Number(latitude), Number(longitude));
+  if (outside) return res.status(400).json({ error: outside });
+  const info = db.prepare('INSERT INTO road_nodes (cemetery_id, latitude, longitude) VALUES (1,?,?)').run(Number(latitude), Number(longitude));
+  res.status(201).json(db.prepare('SELECT id, latitude, longitude FROM road_nodes WHERE id=?').get(info.lastInsertRowid));
+});
+
+app.put('/api/roads/nodes/:id', requireAdmin, (req, res) => {
+  const node = db.prepare('SELECT id FROM road_nodes WHERE id=?').get(req.params.id);
+  if (!node) return res.status(404).json({ error: 'Point not found' });
+  const { latitude, longitude } = req.body || {};
+  if (isNaN(latitude) || isNaN(longitude) || latitude === '' || longitude === '')
+    return res.status(400).json({ error: 'latitude and longitude are required' });
+  const outside = checkLocation(Number(latitude), Number(longitude));
+  if (outside) return res.status(400).json({ error: outside });
+  db.prepare('UPDATE road_nodes SET latitude=?, longitude=? WHERE id=?').run(Number(latitude), Number(longitude), node.id);
+  res.json(db.prepare('SELECT id, latitude, longitude FROM road_nodes WHERE id=?').get(node.id));
+});
+
+app.delete('/api/roads/nodes/:id', requireAdmin, (req, res) => {
+  // road_edges has ON DELETE CASCADE on both node columns (foreign_keys is ON),
+  // so any path segments touching this point go with it.
+  const info = db.prepare('DELETE FROM road_nodes WHERE id=?').run(req.params.id);
+  if (!info.changes) return res.status(404).json({ error: 'Point not found' });
+  res.status(204).end();
+});
+
+app.post('/api/roads/edges', requireAdmin, (req, res) => {
+  let { a, b } = req.body || {};
+  a = Number(a);
+  b = Number(b);
+  if (!a || !b || a === b) return res.status(400).json({ error: 'Pick two different points to connect' });
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  const found = db.prepare('SELECT id FROM road_nodes WHERE id IN (?,?)').all(lo, hi);
+  if (found.length !== 2) return res.status(404).json({ error: 'Point not found' });
+  try {
+    const info = db.prepare('INSERT INTO road_edges (cemetery_id, node_a_id, node_b_id) VALUES (1,?,?)').run(lo, hi);
+    res.status(201).json({ id: info.lastInsertRowid, a: lo, b: hi });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'Those points are already connected' });
+    throw e;
+  }
+});
+
+app.delete('/api/roads/edges/:id', requireAdmin, (req, res) => {
+  const info = db.prepare('DELETE FROM road_edges WHERE id=?').run(req.params.id);
+  if (!info.changes) return res.status(404).json({ error: 'Path segment not found' });
+  res.status(204).end();
+});
+
+// Walking route from a visitor's position (real GPS or the simulated gate) to
+// a grave, over the path network drawn in the admin. Falls back to a direct
+// line (on_road: false) if no paths are drawn yet, or they don't connect the
+// two points.
+app.get('/api/route', (req, res) => {
+  const { lat, lng, grave_id } = req.query;
+  if (isNaN(lat) || isNaN(lng) || lat === '' || lng === '') return res.status(400).json({ error: 'lat and lng are required' });
+  const grave = db.prepare('SELECT latitude, longitude FROM graves WHERE id=?').get(grave_id);
+  if (!grave) return res.status(404).json({ error: 'Grave not found' });
+  const nodes = db.prepare('SELECT id, latitude, longitude FROM road_nodes').all();
+  const edges = db.prepare('SELECT id, node_a_id AS a, node_b_id AS b FROM road_edges').all();
+  const from = { latitude: Number(lat), longitude: Number(lng) };
+  const to = { latitude: grave.latitude, longitude: grave.longitude };
+  res.json(buildRoute({ nodes, edges }, from, to));
+});
+
 app.get('/api/records', (req, res) => {
   const { q, section, status } = req.query;
   const where = [];
@@ -399,8 +480,24 @@ const path = require('path');
 
 const TILE_DIR = path.join(__dirname, 'tile-cache');
 const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-AcademicPrototype/1.0 (contact: CHANGE-ME@example.com)';
-if (!process.env.TILE_USER_AGENT) console.warn('[tiles] TILE_USER_AGENT is not set; OSM may refuse the placeholder contact. Set it to your own email or project URL.');
+const TILE_UA_IS_PLACEHOLDER = !process.env.TILE_USER_AGENT;
 const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+const TILE_PLACEHOLDER = fs.readFileSync(path.join(__dirname, 'assets', 'tile-unavailable.png'));
+
+// OSM's tile policy blocks generic/placeholder User-Agents, and blocks harder
+// once a run of requests comes in quickly (exactly what happens when someone
+// zooms in). Warn loudly, but only once a minute, so the console stays readable.
+let lastUaWarning = 0;
+const warnAboutUa = () => {
+  const now = Date.now();
+  if (now - lastUaWarning < 60_000) return;
+  lastUaWarning = now;
+  console.warn(
+    TILE_UA_IS_PLACEHOLDER
+      ? '[tiles] TILE_USER_AGENT is not set, so OpenStreetMap is very likely refusing tiles ("Access blocked"). Copy server/.env.example to server/.env, put a real contact in it, and restart the server.'
+      : '[tiles] OpenStreetMap is refusing tiles even with a TILE_USER_AGENT set. This usually means too many requests too fast from this network, or a shared IP that is already rate-limited elsewhere. Wait a few minutes before trying again.'
+  );
+};
 
 let tileActive = 0;
 const tileQueue = [];
@@ -431,7 +528,7 @@ async function fetchTile(z, x, y, file) {
       await new Promise((r) => setTimeout(r, 500));
     }
     if (!upstream.ok) {
-      console.warn(`[tiles] OSM refused ${z}/${x}/${y}: HTTP ${upstream.status} (User-Agent: ${TILE_UA})`);
+      if (upstream.status === 403 || upstream.status === 429) warnAboutUa();
       throw new Error(`OSM HTTP ${upstream.status}`);
     }
     const buf = Buffer.from(await upstream.arrayBuffer());
@@ -474,7 +571,10 @@ app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
   } catch (e) {
     if (!/^OSM HTTP/.test(e.message)) console.warn(`[tiles] fetch failed for ${z}/${x}/${y}: ${e.message}`);
     if (stat) return sendCached();
-    res.status(502).end();
+    // Serve a quiet neutral tile instead of a broken image or OSM's own
+    // "Access blocked" graphic. Short max-age so the map fills in for real
+    // as soon as tiles start working again, without the user refreshing.
+    res.set('Cache-Control', 'public, max-age=20').type('png').send(TILE_PLACEHOLDER);
   }
 });
 
