@@ -104,6 +104,9 @@ td.empty { text-align: center; color: var(--muted); padding: 1.6rem; }
 .panel section > button { margin: .35rem .5rem .35rem 0; }
 
 .vertex { width: 16px; height: 16px; background: var(--amber); border: 2px solid var(--ink); border-radius: 3px; cursor: grab; }
+.road-node { width: 14px; height: 14px; background: #8a6d3b; border: 2px solid var(--ink); border-radius: 50%; cursor: pointer; }
+.road-node.pending { background: var(--amber); border-color: #6b4b00; box-shadow: 0 0 0 3px rgba(224,161,0,.35); }
+.dot.road { background: #8a6d3b; border-color: #8a6d3b; border-radius: 2px; }
 .vertex-label { background: var(--ink); color: #fff; border: 0; box-shadow: none; font-weight: 700; padding: 0 5px; }
 .vertex-label::before { display: none; }
 label.check { flex-direction: row; align-items: flex-start; gap: .5rem; margin: .8rem 0 .2rem; color: var(--ink); }

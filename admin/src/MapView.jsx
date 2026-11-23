@@ -4,23 +4,35 @@ import 'leaflet/dist/leaflet.css';
 import { STATES, graveState } from './lease';
 
 
-export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove }) {
+export default function MapView({
+  cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove,
+  roads, roadMode = false, pendingNodeId, selectedEdgeId, onNodeClick, onNodeDrag, onNodeContext, onEdgeClick,
+}) {
   const el = useRef();
   const map = useRef();
   const layer = useRef();
   const draftLayer = useRef();
+  const roadLayerRef = useRef();
   const lock = useRef({});
   const clickRef = useRef();
   clickRef.current = onMapClick;
   const pinMoveRef = useRef();
   pinMoveRef.current = onPinMove;
+  const nodeClickRef = useRef();
+  nodeClickRef.current = onNodeClick;
+  const nodeDragRef = useRef();
+  nodeDragRef.current = onNodeDrag;
+  const nodeContextRef = useRef();
+  nodeContextRef.current = onNodeContext;
+  const edgeClickRef = useRef();
+  edgeClickRef.current = onEdgeClick;
 
   useEffect(() => {
     const m = L.map(el.current, { maxZoom: 22, zoomSnap: 0.25 });
     L.tileLayer('/api/tiles/{z}/{x}/{y}.png', {
       maxZoom: 22,
       maxNativeZoom: 19,
-      attribution: '© OpenStreetMap contributors',
+      attribution: 'Â© OpenStreetMap contributors',
     }).addTo(m);
     const b = cemetery.bounds;
     const area = L.latLngBounds([b.minLat, b.minLng], [b.maxLat, b.maxLng]);
@@ -41,6 +53,7 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
       },
     }).addTo(m);
     layer.current = L.layerGroup().addTo(m);
+    roadLayerRef.current = L.layerGroup().addTo(m);
     draftLayer.current = L.layerGroup().addTo(m);
     m.on('click', (e) => clickRef.current && clickRef.current(e.latlng));
     map.current = m;
@@ -86,6 +99,52 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
       m.setMaxBounds(null);
     }
   }, [locked, cemetery]);
+
+  useEffect(() => {
+    const g = roadLayerRef.current;
+    g.clearLayers();
+    if (!roads) return;
+    const byId = new Map(roads.nodes.map((n) => [n.id, n]));
+    roads.edges.forEach((e) => {
+      const a = byId.get(e.a);
+      const b = byId.get(e.b);
+      if (!a || !b) return;
+      const selected = e.id === selectedEdgeId;
+      const line = L.polyline(
+        [[a.latitude, a.longitude], [b.latitude, b.longitude]],
+        { color: selected ? '#e0a100' : '#8a6d3b', weight: selected ? 5 : 4, opacity: selected ? 1 : 0.85, interactive: roadMode }
+      );
+      if (roadMode)
+        line.on('click', (ev) => {
+          L.DomEvent.stopPropagation(ev);
+          edgeClickRef.current && edgeClickRef.current(e.id);
+        });
+      line.addTo(g);
+    });
+    roads.nodes.forEach((n) => {
+      const pending = n.id === pendingNodeId;
+      const mk = L.marker([n.latitude, n.longitude], {
+        draggable: roadMode,
+        icon: L.divIcon({ className: 'road-node' + (pending ? ' pending' : ''), iconSize: [14, 14] }),
+        interactive: roadMode,
+      });
+      if (roadMode) {
+        mk.on('click', (ev) => {
+          L.DomEvent.stopPropagation(ev);
+          nodeClickRef.current && nodeClickRef.current(n);
+        });
+        mk.on('contextmenu', (ev) => {
+          L.DomEvent.stopPropagation(ev);
+          nodeContextRef.current && nodeContextRef.current(n.id);
+        });
+        mk.on('dragend', (ev) => {
+          const ok = nodeDragRef.current && nodeDragRef.current(n.id, ev.target.getLatLng());
+          if (!ok) ev.target.setLatLng([n.latitude, n.longitude]);
+        });
+      }
+      mk.addTo(g);
+    });
+  }, [roads, roadMode, pendingNodeId, selectedEdgeId, cemetery]);
 
   useEffect(() => {
     const g = draftLayer.current;

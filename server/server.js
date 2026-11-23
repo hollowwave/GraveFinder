@@ -1,8 +1,10 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const db = require('./db');
 const { generateLayout } = require('./layout');
+const { haversine, buildRoute } = require('./routing');
 
 const app = express();
 app.use(cors());
@@ -540,6 +542,22 @@ const path = require('path');
 const TILE_DIR = path.join(__dirname, 'tile-cache');
 const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-CvSU-INSY55/1.0 (contact: clarkkent123@gmail.com)';
 const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+const TILE_PLACEHOLDER = fs.readFileSync(path.join(__dirname, 'assets', 'tile-unavailable.png'));
+
+// OSM's tile policy blocks generic/placeholder User-Agents, and blocks harder
+// once a run of requests comes in quickly (exactly what happens when someone
+// zooms in). Warn loudly, but only once a minute, so the console stays readable.
+let lastUaWarning = 0;
+const warnAboutUa = () => {
+  const now = Date.now();
+  if (now - lastUaWarning < 60_000) return;
+  lastUaWarning = now;
+  console.warn(
+    TILE_UA_IS_PLACEHOLDER
+      ? '[tiles] TILE_USER_AGENT is not set, so OpenStreetMap is very likely refusing tiles ("Access blocked"). Copy server/.env.example to server/.env, put a real contact in it, and restart the server.'
+      : '[tiles] OpenStreetMap is refusing tiles even with a TILE_USER_AGENT set. This usually means too many requests too fast from this network, or a shared IP that is already rate-limited elsewhere. Wait a few minutes before trying again.'
+  );
+};
 
 let tileActive = 0;
 const tileQueue = [];
@@ -570,7 +588,7 @@ async function fetchTile(z, x, y, file) {
       await new Promise((r) => setTimeout(r, 500));
     }
     if (!upstream.ok) {
-      console.warn(`[tiles] OSM refused ${z}/${x}/${y}: HTTP ${upstream.status} (User-Agent: ${TILE_UA})`);
+      if (upstream.status === 403 || upstream.status === 429) warnAboutUa();
       throw new Error(`OSM HTTP ${upstream.status}`);
     }
     const buf = Buffer.from(await upstream.arrayBuffer());
@@ -613,7 +631,10 @@ app.get('/api/tiles/:z/:x/:y.png', async (req, res) => {
   } catch (e) {
     if (!/^OSM HTTP/.test(e.message)) console.warn(`[tiles] fetch failed for ${z}/${x}/${y}: ${e.message}`);
     if (stat) return sendCached();
-    res.status(502).end();
+    // Serve a quiet neutral tile instead of a broken image or OSM's own
+    // "Access blocked" graphic. Short max-age so the map fills in for real
+    // as soon as tiles start working again, without the user refreshing.
+    res.set('Cache-Control', 'public, max-age=20').type('png').send(TILE_PLACEHOLDER);
   }
 });
 
