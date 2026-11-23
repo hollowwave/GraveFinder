@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
+import { STATES, graveState } from './lease';
 import { api } from './api';
 import MapView from './MapView';
 import { pointInRing } from './geo';
+
 
 const GRAVE_LABELS = [['section', 'Section'], ['block', 'Block'], ['row', 'Row'], ['grave_number', 'Grave number']];
 const round = (n) => Math.round(n * 1e7) / 1e7;
@@ -22,7 +24,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const ring = cemetery.geojson.features.find((f) => f.properties.kind === 'boundary').geometry.coordinates[0];
 
   const load = useCallback(() => {
-    api('/graves').then(setGraves);
+    api('/admin/graves').then(setGraves);
     api('/records?status=unassigned').then(setUnassigned);
   }, []);
   useEffect(load, [load]);
@@ -144,7 +146,7 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
   const unassign = () => guard(() => api(`/records/${grave.record_id}/grave`, { method: 'PUT', body: { grave_id: null } }), 'Grave is now available');
 
   const pin = (mode === 'move' || mode === 'add') && coords.latitude !== '' ? { latitude: +coords.latitude, longitude: +coords.longitude } : null;
-  const occupied = graves.filter((g) => g.status === 'occupied').length;
+  const counts = graves.reduce((a, g) => { const k = graveState(g); a[k] = (a[k] || 0) + 1; return a; }, {});
 
   return (
     <>
@@ -154,11 +156,14 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
       <div className="mapgrid">
         <div>
           <MapView cemetery={cemetery} graves={graves} selectedId={selId} onSelect={onGraveClick} onMapClick={onMapClick} pin={pin} onPinMove={placeAt}
-            locked={mode !== 'boundary'} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint} />
-          <p className="legend muted">
-            <span className="dot occ" /> Occupied ({occupied})
-            <span className="dot avail" /> Available ({graves.length - occupied})
-            <span className="dot sel" /> Selected
+            locked={false} draft={draft} onDraftMove={movePoint} onDraftRemove={removePoint} />
+         <p className="legend muted">
+            {Object.entries(STATES).map(([k, s]) => (
+              <span key={k} className="legend-item">
+                <span className="dot" style={{ background: s.fill, borderColor: s.stroke }} /> {s.label} ({counts[k] || 0})
+              </span>
+            ))}
+            <span className="legend-item"><span className="dot sel" /> Selected</span>
           </p>
         </div>
         <aside className="panel">
@@ -169,9 +174,18 @@ export default function MapPage({ cemetery, onCemeteryChange }) {
               <h2>{grave.grave_number}</h2>
               <p className="muted">Section {grave.section}, block {grave.block}, row {grave.row}</p>
               <p>{grave.status === 'occupied' ? `Occupied by ${grave.occupant}` : 'Available'}</p>
+                            {grave.status === 'occupied' && (
+                <p className="muted">
+                  Lease: {grave.lease_status}{grave.lease_end ? `, ends ${grave.lease_end}` : ''}
+                  {grave.assigned_via === 'field' ? ' (assigned by field)' : ''}
+                </p>
+              )}
+              
               {grave.status === 'occupied' ? (
                 <button className="secondary" onClick={unassign}>Remove assignment</button>
-              ) : (
+              )
+              
+              : (
                 <div className="inline">
                   <select value={recordId} onChange={(e) => setRecordId(e.target.value)}>
                     <option value="">Choose a record without a grave</option>

@@ -17,10 +17,27 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// Public select: used by the visitor mobile app. Never include lease or lessee data here.
 const RECORD_SELECT = `
   SELECT r.id, r.full_name, r.date_of_birth, r.date_of_death, r.burial_date, r.grave_id, r.created_at,
          g.section, g.block, g.row, g.grave_number, g.latitude, g.longitude
   FROM burial_records r LEFT JOIN graves g ON g.id = r.grave_id`;
+
+const LEASE_FLAG_SQL = `CASE
+  WHEN l.lease_end IS NOT NULL AND l.lease_end < date('now', 'localtime') THEN 'expired'
+  WHEN l.lease_end IS NOT NULL AND l.lease_end <= date('now', 'localtime', '+90 days') THEN 'due_soon'
+END`;
+
+// Admin select: includes lease and lessee data. Only use behind requireAdmin.
+const ADMIN_SELECT = `
+  SELECT r.id, r.full_name, r.date_of_birth, r.date_of_death, r.burial_date, r.grave_id, r.created_at,
+         g.section, g.block, g.row, g.grave_number, g.latitude, g.longitude,
+         l.lessee_name, l.order_of_payment_no, l.official_receipt_no, l.amount, l.paid_date, l.lease_start, l.lease_end,
+         COALESCE(l.status, 'unpaid') AS lease_status, COALESCE(l.assigned_via, 'office') AS assigned_via,
+         ${LEASE_FLAG_SQL} AS lease_flag
+  FROM burial_records r
+  LEFT JOIN graves g ON g.id = r.grave_id
+  LEFT JOIN leases l ON l.record_id = r.id`;
 
 const isDate = (v) => v === null || v === undefined || v === '' || /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
 
@@ -45,6 +62,55 @@ const clean = (b) => ({
   burial_date: b.burial_date || null,
   grave_id: b.grave_id ? Number(b.grave_id) : null,
 });
+
+const LEASE_KEYS = ['lessee_name', 'order_of_payment_no', 'official_receipt_no', 'amount', 'paid_date', 'lease_start', 'lease_end', 'lease_status', 'assigned_via'];
+
+const validateLease = (b) => {
+  const e = {};
+  const st = b.lease_status || 'unpaid';
+  if (st !== 'provisional' && !String(b.lessee_name || '').trim()) e.lessee_name = 'Lessee name is required';
+  if (!['provisional', 'unpaid', 'paid'].includes(st)) e.lease_status = 'Choose provisional, unpaid, or paid';
+  ['paid_date', 'lease_start', 'lease_end'].forEach((f) => {
+    if (!isDate(b[f])) e[f] = 'Use YYYY-MM-DD';
+  });
+  const hasAmount = b.amount !== undefined && b.amount !== null && b.amount !== '';
+  if (hasAmount && !(Number(b.amount) >= 0)) e.amount = 'Amount must be a number';
+  if (!e.lease_start && !e.lease_end && b.lease_start && b.lease_end && b.lease_end <= b.lease_start)
+    e.lease_end = 'Lease end must be after lease start';
+  if (st === 'paid') {
+    if (!String(b.official_receipt_no || '').trim()) e.official_receipt_no = 'Official Receipt number is required when paid';
+    if (!hasAmount) e.amount = e.amount || 'Amount is required when paid';
+    if (!b.paid_date) e.paid_date = e.paid_date || 'Paid date is required when paid';
+  }
+  return e;
+};
+
+const txt = (v) => (v === undefined || v === null || String(v).trim() === '' ? null : String(v).trim());
+
+const cleanLease = (b) => ({
+  lessee_name: txt(b.lessee_name),
+  order_of_payment_no: txt(b.order_of_payment_no),
+  official_receipt_no: txt(b.official_receipt_no),
+  amount: txt(b.amount) === null ? null : Number(b.amount),
+  paid_date: b.paid_date || null,
+  lease_start: b.lease_start || null,
+  lease_end: b.lease_end || null,
+  status: b.lease_status || 'unpaid',
+  assigned_via: b.assigned_via === 'field' ? 'field' : 'office',
+});
+
+const saveLease = db.prepare(`
+  INSERT INTO leases (record_id, lessee_name, order_of_payment_no, official_receipt_no, amount, paid_date, lease_start, lease_end, status, assigned_via, updated_at)
+  VALUES (@record_id, @lessee_name, @order_of_payment_no, @official_receipt_no, @amount, @paid_date, @lease_start, @lease_end, @status, @assigned_via, datetime('now'))
+  ON CONFLICT(record_id) DO UPDATE SET
+    lessee_name = excluded.lessee_name,
+    order_of_payment_no = excluded.order_of_payment_no, official_receipt_no = excluded.official_receipt_no,
+    amount = excluded.amount, paid_date = excluded.paid_date, lease_start = excluded.lease_start,
+    lease_end = excluded.lease_end, status = excluded.status, assigned_via = excluded.assigned_via,
+    updated_at = datetime('now')`);
+
+const receiptDup = (e) => /UNIQUE/.test(String(e.message)) && /official_receipt_no|idx_leases_receipt/.test(String(e.message));
+const dupResponse = (res) => res.status(409).json({ errors: { official_receipt_no: 'This Official Receipt number is already used by another record' } });
 
 const checkGrave = (graveId, recordId) => {
   if (!graveId) return null;
@@ -317,8 +383,8 @@ app.delete('/api/graves/:id', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
-app.get('/api/records', (req, res) => {
-  const { q, section, status } = req.query;
+const recordWhere = (query, withLease) => {
+  const { q, section, status, lease } = query;
   const where = [];
   const params = [];
   String(q || '').trim().split(/\s+/).filter(Boolean).forEach((t) => {
@@ -328,8 +394,32 @@ app.get('/api/records', (req, res) => {
   if (section) { where.push('g.section = ?'); params.push(section); }
   if (status === 'unassigned') where.push('r.grave_id IS NULL');
   if (status === 'assigned') where.push('r.grave_id IS NOT NULL');
-  const sql = `${RECORD_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r.full_name COLLATE NOCASE`;
-  res.json(db.prepare(sql).all(...params));
+  if (withLease && ['paid', 'unpaid', 'provisional'].includes(lease)) {
+    where.push("COALESCE(l.status, 'unpaid') = ?");
+    params.push(lease);
+  }
+  return { clause: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
+};
+
+app.get('/api/records', (req, res) => {
+  const { clause, params } = recordWhere(req.query, false);
+  res.json(db.prepare(`${RECORD_SELECT} ${clause} ORDER BY r.full_name COLLATE NOCASE`).all(...params));
+});
+
+app.get('/api/admin/records', requireAdmin, (req, res) => {
+  const { clause, params } = recordWhere(req.query, true);
+  res.json(db.prepare(`${ADMIN_SELECT} ${clause} ORDER BY r.full_name COLLATE NOCASE`).all(...params));
+});
+
+app.get('/api/admin/graves', requireAdmin, (req, res) => {
+  res.json(db.prepare(`
+    SELECT g.*, r.id AS record_id, r.full_name AS occupant, l.lessee_name,
+           COALESCE(l.status, 'unpaid') AS lease_status, l.assigned_via, l.official_receipt_no, l.lease_end,
+           ${LEASE_FLAG_SQL} AS lease_flag
+    FROM graves g
+    LEFT JOIN burial_records r ON r.grave_id = g.id
+    LEFT JOIN leases l ON l.record_id = r.id
+    ORDER BY g.section, g.block, g.row, g.grave_number`).all());
 });
 
 app.get('/api/records/:id', (req, res) => {
@@ -339,36 +429,51 @@ app.get('/api/records/:id', (req, res) => {
 });
 
 app.post('/api/records', requireAdmin, (req, res) => {
-  const errors = validateRecord(req.body || {});
+  const body = req.body || {};
+  const errors = { ...validateRecord(body), ...validateLease(body) };
   if (Object.keys(errors).length) return res.status(400).json({ errors });
-  const data = clean(req.body);
+  const data = clean(body);
   const conflict = checkGrave(data.grave_id, null);
   if (conflict) return res.status(conflict.status).json({ error: conflict.error });
-  const id = db.transaction(() => {
-    const info = db.prepare(
-      'INSERT INTO burial_records (full_name, date_of_birth, date_of_death, burial_date, grave_id) VALUES (?,?,?,?,?)'
-    ).run(data.full_name, data.date_of_birth, data.date_of_death, data.burial_date, data.grave_id);
-    syncStatus.run();
-    return info.lastInsertRowid;
-  })();
-  res.status(201).json(db.prepare(`${RECORD_SELECT} WHERE r.id=?`).get(id));
+  try {
+    const id = db.transaction(() => {
+      const info = db.prepare(
+        'INSERT INTO burial_records (full_name, date_of_birth, date_of_death, burial_date, grave_id) VALUES (?,?,?,?,?)'
+      ).run(data.full_name, data.date_of_birth, data.date_of_death, data.burial_date, data.grave_id);
+      saveLease.run({ record_id: info.lastInsertRowid, ...cleanLease(body) });
+      syncStatus.run();
+      return info.lastInsertRowid;
+    })();
+    res.status(201).json(db.prepare(`${ADMIN_SELECT} WHERE r.id=?`).get(id));
+  } catch (e) {
+    if (receiptDup(e)) return dupResponse(res);
+    throw e;
+  }
 });
 
 app.put('/api/records/:id', requireAdmin, (req, res) => {
   const existing = db.prepare('SELECT id FROM burial_records WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Record not found' });
-  const errors = validateRecord(req.body || {});
+  const body = req.body || {};
+  const withLease = LEASE_KEYS.some((k) => body[k] !== undefined);
+  const errors = { ...validateRecord(body), ...(withLease ? validateLease(body) : {}) };
   if (Object.keys(errors).length) return res.status(400).json({ errors });
-  const data = clean(req.body);
+  const data = clean(body);
   const conflict = checkGrave(data.grave_id, existing.id);
   if (conflict) return res.status(conflict.status).json({ error: conflict.error });
-  db.transaction(() => {
-    db.prepare(
-      'UPDATE burial_records SET full_name=?, date_of_birth=?, date_of_death=?, burial_date=?, grave_id=? WHERE id=?'
-    ).run(data.full_name, data.date_of_birth, data.date_of_death, data.burial_date, data.grave_id, existing.id);
-    syncStatus.run();
-  })();
-  res.json(db.prepare(`${RECORD_SELECT} WHERE r.id=?`).get(existing.id));
+  try {
+    db.transaction(() => {
+      db.prepare(
+        'UPDATE burial_records SET full_name=?, date_of_birth=?, date_of_death=?, burial_date=?, grave_id=? WHERE id=?'
+      ).run(data.full_name, data.date_of_birth, data.date_of_death, data.burial_date, data.grave_id, existing.id);
+      if (withLease) saveLease.run({ record_id: existing.id, ...cleanLease(body) });
+      syncStatus.run();
+    })();
+  } catch (e) {
+    if (receiptDup(e)) return dupResponse(res);
+    throw e;
+  }
+  res.json(db.prepare(`${ADMIN_SELECT} WHERE r.id=?`).get(existing.id));
 });
 
 app.put('/api/records/:id/grave', requireAdmin, (req, res) => {
@@ -394,12 +499,46 @@ app.delete('/api/records/:id', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
+const attention = (r) => (r.lease_status !== 'paid' ? r.lease_status : r.lease_flag);
+const RANK = { provisional: 0, unpaid: 1, expired: 2, due_soon: 3 };
+
+app.get('/api/reconciliation', requireAdmin, (req, res) => {
+  const all = db.prepare(`${ADMIN_SELECT} ORDER BY r.burial_date, r.id`).all();
+  const rows = all.filter(attention).sort((a, b) => RANK[attention(a)] - RANK[attention(b)]);
+  const count = (k) => rows.filter((r) => attention(r) === k).length;
+  res.json({
+    summary: {
+      total: all.length,
+      occupiedUnpaid: all.filter((r) => r.grave_id && r.lease_status !== 'paid').length,
+      provisional: count('provisional'),
+      unpaid: count('unpaid'),
+      expired: count('expired'),
+      dueSoon: count('due_soon'),
+    },
+    rows,
+  });
+});
+
+app.put('/api/records/:id/lease', requireAdmin, (req, res) => {
+  const cur = db.prepare(`${ADMIN_SELECT} WHERE r.id=?`).get(req.params.id);
+  if (!cur) return res.status(404).json({ error: 'Record not found' });
+  const merged = { ...cur, ...(req.body || {}) };
+  const errors = validateLease(merged);
+  if (Object.keys(errors).length) return res.status(400).json({ errors });
+  try {
+    saveLease.run({ record_id: cur.id, ...cleanLease(merged) });
+  } catch (e) {
+    if (receiptDup(e)) return dupResponse(res);
+    throw e;
+  }
+  res.json(db.prepare(`${ADMIN_SELECT} WHERE r.id=?`).get(cur.id));
+});
+
 const fs = require('fs');
 const path = require('path');
 
 const TILE_DIR = path.join(__dirname, 'tile-cache');
-const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-AcademicPrototype/1.0 (contact: CHANGE-ME@example.com)';
-if (!process.env.TILE_USER_AGENT) console.warn('[tiles] TILE_USER_AGENT is not set; OSM may refuse the placeholder contact. Set it to your own email or project URL.');
+const TILE_UA = process.env.TILE_USER_AGENT || 'GraveFinder-CvSU-INSY55/1.0 (contact: clarkkent123@gmail.com)';
 const TILE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 
 let tileActive = 0;

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { api, auth, show, gravePath } from './api';
 import Records from './Records';
 import MapPage from './MapPage';
+import Reconciliation from './Reconciliation';
+
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -95,7 +97,7 @@ export default function App() {
     setUser(null);
     setCemetery(null);
   };
-  const nav = [['overview', 'Overview'], ['records', 'Burial records'], ['map', 'Cemetery map']];
+const nav = [['overview', 'Overview'], ['records', 'Burial records'], ['reconciliation', 'Reconciliation'], ['map', 'Cemetery map']];
 
   return (
     <div className="shell">
@@ -114,6 +116,7 @@ export default function App() {
             {page === 'overview' && <Overview go={setPage} />}
             {page === 'records' && <Records cemetery={cemetery} />}
             {page === 'map' && <MapPage cemetery={cemetery} onCemeteryChange={setCemetery} />}
+            {page === 'reconciliation' && <Reconciliation />}
           </>
         )}
       </main>

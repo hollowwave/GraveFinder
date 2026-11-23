@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { STATES, graveState } from './lease';
 
-const COLORS = { occupied: '#8c3b34', available: '#ffffff', selected: '#e0a100' };
 
 export default function MapView({ cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove }) {
   const el = useRef();
@@ -50,12 +50,13 @@ export default function MapView({ cemetery, graves, selectedId, onSelect, onMapC
   useEffect(() => {
     layer.current.clearLayers();
     graves.forEach((g) => {
-      const sel = g.id === selectedId;
+       const sel = g.id === selectedId;
+      const st = STATES[graveState(g)];
       const m = L.circleMarker([g.latitude, g.longitude], {
         radius: sel ? 9 : 6,
         weight: sel ? 3 : 2,
-        color: sel ? '#6b4b00' : g.status === 'occupied' ? '#8c3b34' : '#2f5d50',
-        fillColor: sel ? COLORS.selected : COLORS[g.status],
+        color: sel ? '#6b4b00' : st.stroke,
+        fillColor: sel ? '#e0a100' : st.fill,
         fillOpacity: 1,
       });
       m.bindTooltip(g.grave_number, { permanent: sel, direction: 'top', offset: [0, -6] });
