@@ -22,6 +22,7 @@ export async function api(path, opts = {}) {
   if (!res.ok) {
     const e = new Error(data.error || 'Request failed');
     e.errors = data.errors;
+    e.data = data;
     throw e;
   }
   return data;

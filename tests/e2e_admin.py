@@ -49,6 +49,7 @@ with sync_playwright() as p:
     page.click('text=Create record')
     check('form validation blocks empty submit', page.locator('.dialog .error').count() == 2)
     page.fill('.dialog input >> nth=0', 'Demo Visitor Target')
+    page.fill('.dialog label:has-text("Lessee name") input', 'Test Lessee')
     page.locator('.dialog input[type=date]').nth(0).fill('1950-05-05')
     page.locator('.dialog input[type=date]').nth(1).fill('2026-11-01')
     page.locator('.dialog input[type=date]').nth(2).fill('2026-11-04')

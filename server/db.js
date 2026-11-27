@@ -62,4 +62,27 @@ const cemeteryCols = db.prepare('PRAGMA table_info(cemeteries)').all().map((c) =
 if (!cemeteryCols.includes('bounds')) db.exec('ALTER TABLE cemeteries ADD COLUMN bounds TEXT');
 if (!cemeteryCols.includes('boundary')) db.exec('ALTER TABLE cemeteries ADD COLUMN boundary TEXT');
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS leases (
+  id INTEGER PRIMARY KEY,
+  record_id INTEGER NOT NULL UNIQUE REFERENCES burial_records(id) ON DELETE CASCADE,
+  lessee_name TEXT,
+  order_of_payment_no TEXT,
+  official_receipt_no TEXT,
+  amount REAL,
+  paid_date TEXT,
+  lease_start TEXT,
+  lease_end TEXT,
+  status TEXT NOT NULL DEFAULT 'unpaid' CHECK (status IN ('provisional','unpaid','paid')),
+  assigned_via TEXT NOT NULL DEFAULT 'office' CHECK (assigned_via IN ('office','field')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_receipt ON leases(official_receipt_no) WHERE official_receipt_no IS NOT NULL;
+INSERT INTO leases (record_id, status) SELECT id, 'unpaid' FROM burial_records WHERE id NOT IN (SELECT record_id FROM leases);
+`);
+
+// Migrate databases created before lessee_name existed (must run after the table exists).
+const leaseCols = db.prepare('PRAGMA table_info(leases)').all().map((c) => c.name);
+if (!leaseCols.includes('lessee_name')) db.exec('ALTER TABLE leases ADD COLUMN lessee_name TEXT');
+
 module.exports = db;

@@ -33,7 +33,7 @@ check('no two records share a grave', len({r['grave_id'] for r in q('')}) == len
 
 tok = post('/login', {'username': 'admin', 'password': 'admin123'})['token']
 free = [g for g in graves if g['status'] == 'available'][3]
-new = post('/records', {'full_name': 'Visitor Flow Person', 'date_of_death': '2026-11-02', 'grave_id': free['id']}, tok)
+new = post('/records', {'full_name': 'Visitor Flow Person', 'date_of_death': '2026-11-02', 'lessee_name': 'Test Lessee', 'grave_id': free['id']}, tok)
 found = q('flow person')
 check('new record is found by the visitor search', len(found) == 1)
 detail = get('/records/%d' % found[0]['id'])
