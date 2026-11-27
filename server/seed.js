@@ -35,8 +35,34 @@ const records = [
   ['Ernesto Villareal', '1953-07-26', '2025-03-18', '2025-03-21', 'D', 2, 3, 3],
 ];
 
+
+const fromToday = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString('en-CA'); };
+const shiftYears = (s, n) => String(+s.slice(0, 4) + n) + s.slice(4).replace('-02-29', '-02-28');
+const LEASE_FEE = 5000; // placeholder: replace with the city's real 5-year lease fee
+
+function leaseFor(idx, burial) {
+  const ref = String(idx + 1).padStart(4, '0');
+  const unpaid = (status, via) => ({ op: null, or: null, amount: null, paid: null, via, status, start: burial, end: shiftYears(burial, 5) });
+  const paid = (start, end) => ({
+    op: `OP-${start.slice(0, 4)}-${ref}`, or: `OR-${start.slice(0, 4)}-${ref}`,
+    amount: LEASE_FEE, paid: start, via: 'office', status: 'paid', start, end,
+  });
+  if (idx === 25) return unpaid('provisional', 'field'); // weekend burial, not yet encoded
+  if (idx === 22) return unpaid('unpaid', 'office');
+  if (idx === 18) return unpaid('unpaid', 'field');
+  const fixedEnd = { 5: fromToday(-40), 11: fromToday(30), 3: fromToday(75) }[idx]; // lapsed, due soon, due soon
+  if (fixedEnd) return paid(shiftYears(fixedEnd, -5), fixedEnd);
+  let start = burial;
+  while (shiftYears(start, 5) < fromToday(120)) start = shiftYears(start, 5); // renewed on schedule
+  return paid(start, shiftYears(start, 5));
+}
+
+const FIRST = ['Maria', 'Jose', 'Ana', 'Pedro', 'Luz', 'Carlos', 'Rosa', 'Mario'];
+const lesseeFor = (idx, name) => `${FIRST[idx % FIRST.length]} ${name.trim().split(/\s+/).pop()}`;
+
+
 const run = db.transaction(() => {
-  db.exec('DELETE FROM burial_records; DELETE FROM graves; DELETE FROM cemeteries; DELETE FROM admin_users;');
+  db.exec('DELETE FROM road_edges; DELETE FROM road_nodes; DELETE FROM burial_records; DELETE FROM graves; DELETE FROM cemeteries; DELETE FROM admin_users;');
 
   const placed = generateLayout(config.center, 1);
   const lats = placed.map((g) => g.latitude);
@@ -71,13 +97,23 @@ const run = db.transaction(() => {
   const insertRecord = db.prepare(
     'INSERT INTO burial_records (full_name, date_of_birth, date_of_death, burial_date, grave_id, created_at) VALUES (?,?,?,?,?,?)'
   );
+
+const insertLease = db.prepare(`INSERT INTO leases
+  (record_id, lessee_name, order_of_payment_no, official_receipt_no, amount, paid_date, lease_start, lease_end, status, assigned_via)
+  VALUES (?,?,?,?,?,?,?,?,?,?)`);
+
+
+
   const occupy = db.prepare("UPDATE graves SET status='occupied' WHERE id=?");
 
   records.forEach(([name, dob, dod, bd, section, block, row, g], idx) => {
     const grave = findGrave.get(section, String(block), String(row), `%-${String(g).padStart(2, '0')}`);
     const created = `2025-0${(idx % 9) + 1}-1${idx % 9} 09:00:00`;
-    insertRecord.run(name, dob, dod, bd, grave.id, created);
+    const info = insertRecord.run(name, dob, dod, bd, grave.id, created);
     occupy.run(grave.id);
+       const L = leaseFor(idx, bd);
+    const lessee = L.status === 'provisional' ? null : lesseeFor(idx, name); 
+    insertLease.run(info.lastInsertRowid, lessee, L.op, L.or, L.amount, L.paid, L.start, L.end, L.status, L.via);
   });
 
   db.prepare('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)').run('admin', hash('admin123'));

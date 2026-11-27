@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { STATES, graveState } from './lease';
 
-const COLORS = { occupied: '#8c3b34', available: '#ffffff', selected: '#e0a100' };
 
 export default function MapView({
-  cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove,
+  cemetery, graves, selectedId, onSelect, onMapClick, pin, onPinMove, locked = true, draft, onDraftMove, onDraftRemove, selectedVertex = null, onDraftSelect,
+  pickedIds, outsideIds,
   roads, roadMode = false, pendingNodeId, selectedEdgeId, onNodeClick, onNodeDrag, onNodeContext, onEdgeClick,
 }) {
   const el = useRef();
@@ -63,15 +64,17 @@ export default function MapView({
   useEffect(() => {
     layer.current.clearLayers();
     graves.forEach((g) => {
-      const sel = g.id === selectedId;
+      const sel = g.id === selectedId || (pickedIds && pickedIds.has(g.id));
+      const outside = outsideIds && outsideIds.has(g.id);
+      const st = STATES[graveState(g)];
       const m = L.circleMarker([g.latitude, g.longitude], {
-        radius: sel ? 9 : 6,
-        weight: sel ? 3 : 2,
-        color: sel ? '#6b4b00' : g.status === 'occupied' ? '#8c3b34' : '#2f5d50',
-        fillColor: sel ? COLORS.selected : COLORS[g.status],
+        radius: sel ? 9 : outside ? 8 : 6,
+        weight: sel || outside ? 3 : 2,
+        color: sel ? '#6b4b00' : outside ? '#c0261d' : st.stroke,
+        fillColor: sel ? '#e0a100' : outside ? '#ffd9d6' : st.fill,
         fillOpacity: 1,
       });
-      m.bindTooltip(g.grave_number, { permanent: sel, direction: 'top', offset: [0, -6] });
+      m.bindTooltip(g.grave_number, { permanent: g.id === selectedId, direction: 'top', offset: [0, -6] });
       m.on('click', (e) => {
         L.DomEvent.stopPropagation(e);
         onSelect && onSelect(g, e.latlng);
@@ -86,7 +89,7 @@ export default function MapView({
       });
       mk.addTo(layer.current);
     }
-  }, [graves, selectedId, pin, onSelect, cemetery]);
+  }, [graves, selectedId, pickedIds, outsideIds, pin, onSelect, cemetery]);
 
   useEffect(() => {
     const m = map.current;
@@ -153,13 +156,20 @@ export default function MapView({
     const style = { color: '#b07d00', weight: 2, dashArray: '5 4', fillColor: '#e0a100', fillOpacity: 0.15, interactive: false };
     (pts.length >= 3 ? L.polygon(pts, style) : L.polyline(pts, style)).addTo(g);
     pts.forEach((pt, i) => {
-      const mk = L.marker(pt, { draggable: true, icon: L.divIcon({ className: 'vertex', iconSize: [16, 16] }) });
+      const mk = L.marker(pt, { draggable: true, icon: L.divIcon({ className: 'vertex' + (i === selectedVertex ? ' sel' : ''), iconSize: [16, 16] }) });
       mk.bindTooltip(String(i + 1), { permanent: true, direction: 'top', offset: [0, -8], className: 'vertex-label' });
       mk.on('dragend', (e) => onDraftMove && onDraftMove(i, e.target.getLatLng()));
-      mk.on('contextmenu', () => onDraftRemove && onDraftRemove(i));
+      mk.on('click', (e) => {
+        L.DomEvent.stopPropagation(e);
+        onDraftSelect && onDraftSelect(i);
+      });
+      mk.on('contextmenu', (e) => {
+        L.DomEvent.stopPropagation(e);
+        onDraftRemove && onDraftRemove(i);
+      });
       mk.addTo(g);
     });
-  }, [draft, cemetery, onDraftMove, onDraftRemove]);
+  }, [draft, cemetery, onDraftMove, onDraftRemove, onDraftSelect, selectedVertex]);
 
   return <div ref={el} className="map" />;
 }

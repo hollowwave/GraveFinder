@@ -40,9 +40,10 @@ GraveFinder is an undergraduate capstone prototype (Bachelor of Science in Infor
   - add a grave
   - move a grave by dragging it or clicking
   - edit a grave's section, block, row, and number
-  - delete a grave that has no burial record
+  - delete a grave, including one with a burial record (the record is kept and simply has no grave afterwards)
+  - select several graves, a whole section, or every grave, and delete them in one step
   - assign or unassign records
-- Boundary editor: draw the cemetery outline by clicking corner points, dragging them, and right-clicking to delete
+- Boundary editor: draw the cemetery outline by clicking corner points (a new corner goes into the nearest edge), dragging them, and deleting a selected point with a button, the Delete key, or a right-click. Graves that the new shape would leave outside are shown in red, and you choose to block the save, move the sample graves inside, or delete them
 - Graves can only be placed inside the boundary, and the server enforces this as well
 
 ## Architecture
@@ -163,12 +164,13 @@ Admin routes need the bearer token returned by `POST /api/login`.
 | --- | --- | --- | --- |
 | POST | `/api/login` | public | Log in and receive a token |
 | GET | `/api/cemetery` | public | Cemetery details, boundary, and sections |
-| PUT | `/api/cemetery/boundary` | admin | Save a new boundary |
+| PUT | `/api/cemetery/boundary` | admin | Save a new boundary: `{ ring, relayout?, outside? }`. Refused if graves fall outside, unless `relayout` moves the sample graves inside or `outside: "delete"` deletes them (burial records are kept) |
 | GET | `/api/stats` | public | Overview counts |
 | GET | `/api/graves` | public | List graves (`?status=`, `?section=`) |
 | POST | `/api/graves` | admin | Add a grave |
 | PUT | `/api/graves/:id` | admin | Update coordinates and/or section, block, row, grave number |
-| DELETE | `/api/graves/:id` | admin | Delete a grave. Refused if it has a burial record |
+| DELETE | `/api/graves/:id` | admin | Delete a grave. Refused if it has a burial record, unless `?unassign=true` (the record is kept, without a grave) |
+| POST | `/api/graves/bulk-delete` | admin | Delete many graves: `{ ids: [...] }` or `{ all: true }`, plus `unassign: true` to include graves with burial records |
 | GET | `/api/records` | public | Search records (`?q=`, `?section=`, `?status=assigned\|unassigned`) |
 | GET | `/api/records/:id` | public | One record |
 | POST | `/api/records` | admin | Add a record |
@@ -184,6 +186,8 @@ With the server and the admin app running and the database freshly seeded, run t
 ```bash
 python3 tests/visitor_flow.py   # API: search, record detail, grave coordinates, boundary rules
 python3 tests/e2e_admin.py      # browser: login, records, grave assignment, map edits
+python3 tests/map_editor_delete.py    # browser: delete graves one by one, in bulk, occupied or not (reseed afterwards)
+python3 tests/map_editor_boundary.py  # browser: boundary points, nearest-edge insert, graves outside (reseed afterwards)
 ```
 
 Run `npm run seed` in `server/` before the browser test to reset the data. The mobile app's screens are not covered by the automated tests.
